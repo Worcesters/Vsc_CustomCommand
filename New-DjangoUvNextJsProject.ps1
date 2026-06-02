@@ -37,10 +37,18 @@
 .PARAMETER MigrateTimeoutSeconds
   Timeout de la migration initiale (defaut : 120s).
 
+.PARAMETER CommandTimeoutSeconds
+  Timeout des commandes uv (defaut : 900s).
+
+.PARAMETER NoInteractive
+  Desactive les questions interactives (equivalent -NewFolder si ProjectName fourni).
+
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1
+  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvNextJsProject.ps1
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1 -NewFolder mon_site -AppName blog
+  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvNextJsProject.ps1 -NewFolder mon_site -AppName blog
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvNextJsProject.ps1 -NewFolder mon_site -ParentPath E:\Projets -NoInteractive
 #>
 
 [CmdletBinding()]
@@ -60,11 +68,59 @@ param(
     [switch]$SkipDocker,
     [switch]$InstallFrontendDeps,
     [switch]$SkipMigrate,
-    [int]$MigrateTimeoutSeconds = 120
+    [switch]$NoInteractive,
+    [int]$MigrateTimeoutSeconds = 120,
+    [int]$CommandTimeoutSeconds = 900
 )
 
+$script:PreviousErrorActionPreference = $ErrorActionPreference
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:ScaffoldFailed = $false
+$script:DbEnvKeys = @(
+    "DJANGO_DB_HOST", "DJANGO_DB_ENGINE", "DJANGO_DB_NAME",
+    "DJANGO_DB_USER", "DJANGO_DB_PASSWORD", "DJANGO_DB_PORT", "DJANGO_USE_POSTGRES"
+)
+
+function Write-Failure {
+    param([string]$Message)
+    $script:ScaffoldFailed = $true
+    Write-Host ""
+    Write-Host "  [ECHEC] $Message" -ForegroundColor Red
+}
+
+function Restore-ShellPreferences {
+    $ErrorActionPreference = $script:PreviousErrorActionPreference
+    Set-StrictMode -Off
+}
+
+function Test-DirectoryIsEmpty {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    $items = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)
+    return ($items.Count -eq 0)
+}
+
+function Get-AvailableProjectPath {
+    param(
+        [Parameter(Mandatory)][string]$ParentPath,
+        [Parameter(Mandatory)][string]$BaseName
+    )
+    $candidate = $BaseName
+    $i = 1
+    do {
+        $candidatePath = Join-Path $ParentPath $candidate
+        if (-not (Test-Path -LiteralPath $candidatePath)) {
+            return @{ Name = $candidate; Path = $candidatePath; Renamed = ($candidate -ne $BaseName) }
+        }
+        if (Test-DirectoryIsEmpty -Path $candidatePath) {
+            return @{ Name = $candidate; Path = $candidatePath; Renamed = ($candidate -ne $BaseName) }
+        }
+        $candidate = "${BaseName}_$i"
+        $i++
+    } while ($i -lt 1000)
+    throw "Impossible de trouver un nom de dossier libre pour '$BaseName'."
+}
 
 # --- Pipeline UI ---
 $script:PipelineTotal = 10
@@ -212,7 +268,14 @@ function Invoke-CheckedCommand {
     $psi.CreateNoWindow = $true
     $psi.WorkingDirectory = $WorkingDirectory
     foreach ($key in $EnvironmentOverrides.Keys) {
-        $psi.EnvironmentVariables[$key] = [string]$EnvironmentOverrides[$key]
+        $value = [string]$EnvironmentOverrides[$key]
+        if ([string]::IsNullOrEmpty($value)) {
+            if ($psi.EnvironmentVariables.ContainsKey($key)) {
+                [void]$psi.EnvironmentVariables.Remove($key)
+            }
+        } else {
+            $psi.EnvironmentVariables[$key] = $value
+        }
     }
     $p = [System.Diagnostics.Process]::Start($psi)
     $stdoutBuilder = New-Object System.Text.StringBuilder
@@ -242,7 +305,7 @@ function Invoke-CheckedCommand {
     } else {
         $p.WaitForExit()
     }
-    $p.WaitForExit()
+    Start-Sleep -Milliseconds 150
     $out = $stdoutBuilder.ToString()
     $err = $stderrBuilder.ToString()
     if ($p.ExitCode -ne 0) {
@@ -253,6 +316,75 @@ function Invoke-CheckedCommand {
     if (-not $Quiet -and $out) {
         $trimmed = $out.TrimEnd()
         if ($trimmed.Length -gt 0) { Write-Host "     $trimmed" -ForegroundColor DarkGray }
+    }
+}
+
+function Invoke-NativeCli {
+    param(
+        [Parameter(Mandatory)][string]$Exe,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [switch]$Quiet
+    )
+    $exePath = Resolve-ExecutablePath -Name $Exe
+    if (-not $exePath) {
+        throw "Executable introuvable : $Exe"
+    }
+    if (-not $Quiet) {
+        Write-Host "     > $Exe $($Arguments -join ' ')" -ForegroundColor DarkGray
+    }
+    Push-Location -LiteralPath $WorkingDirectory
+    try {
+        & $exePath @Arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "Commande echouee (code $LASTEXITCODE) : $Exe $($Arguments -join ' ')"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Invoke-UvCommand {
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [switch]$Quiet
+    )
+    Invoke-NativeCli -Exe "uv" -Arguments $Arguments -WorkingDirectory $WorkingDirectory -Quiet:$Quiet
+}
+
+function Invoke-DjangoMigrate {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [int]$TimeoutSeconds
+    )
+    $pythonExe = Join-Path $Root ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $pythonExe)) {
+        throw "Python venv introuvable. Lancez d'abord: uv sync"
+    }
+
+    $savedEnv = @{}
+    foreach ($key in $script:DbEnvKeys) {
+        $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+        if ($null -ne $item) {
+            $savedEnv[$key] = $item.Value
+            Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+        }
+    }
+
+    try {
+        $env:DJANGO_ENV = "dev"
+        $env:DJANGO_SETTINGS_MODULE = "config.settings"
+        Invoke-NativeCli -Exe $pythonExe -Arguments @(
+            "manage.py", "migrate", "--noinput", "--verbosity", "1"
+        ) -WorkingDirectory $Root -Quiet
+    } finally {
+        foreach ($key in $script:DbEnvKeys) {
+            Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+        }
+        foreach ($key in $savedEnv.Keys) {
+            Set-Item -Path "Env:$key" -Value $savedEnv[$key]
+        }
     }
 }
 
@@ -441,7 +573,8 @@ import os
 DEBUG = True
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "web"]
 
-if os.environ.get("DJANGO_DB_HOST"):
+_use_pg = os.environ.get("DJANGO_USE_POSTGRES", "").lower() in ("1", "true", "yes")
+if _use_pg and os.environ.get("DJANGO_DB_HOST"):
     DATABASES = {
         "default": {
             "ENGINE": os.environ.get(
@@ -531,7 +664,6 @@ from django.urls import include, path
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("api/", include("apps.$AppName.urls")),
     path("", include("apps.$AppName.urls")),
 ]
 "@
@@ -596,11 +728,11 @@ from django.views.generic import TemplateView
 
 
 class HomeView(TemplateView):
-    \"\"\"Page d'accueil admin/HTMX (CBV).
+    '''Page d'accueil admin/HTMX (CBV).
 
     MRO:
     1. TemplateView.get -> rendu template $AppName/home.html
-    \"\"\"
+    '''
 
     template_name = "$AppName/home.html"
 "@
@@ -962,6 +1094,7 @@ services:
       DJANGO_ENV: dev
       DJANGO_SETTINGS_MODULE: config.settings
       DJANGO_SECRET_KEY: dev-docker-only
+      DJANGO_USE_POSTGRES: "1"
       DJANGO_DB_ENGINE: django.db.backends.postgresql
       DJANGO_DB_NAME: app
       DJANGO_DB_USER: app
@@ -1322,7 +1455,8 @@ function Install-FrontendDependencies {
     foreach ($tool in @("pnpm", "npm")) {
         if (-not (Resolve-ExecutablePath -Name $tool)) { continue }
         try {
-            Invoke-CheckedCommand -Exe $tool -Arguments @("install") -WorkingDirectory $FrontendRoot -Quiet
+            Invoke-CheckedCommand -Exe $tool -Arguments @("install") -WorkingDirectory $FrontendRoot `
+                -Quiet -TimeoutSeconds $CommandTimeoutSeconds
             return $tool
         } catch {
             Write-Host "     $tool install ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
@@ -1334,104 +1468,105 @@ function Install-FrontendDependencies {
 
 # --- Execution principale ---
 
-Write-PipelineBanner -Subtitle "Initialisation interactive"
-
-if (-not (Test-PythonIdentifier $AppName)) {
-    throw "AppName invalide : lettres, chiffres, underscore uniquement."
-}
-
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    throw "uv introuvable dans le PATH. https://docs.astral.sh/uv/"
-}
-
 $createdNewFolder = $false
+$root = ""
 $useCurrent = $UseCurrentFolder.IsPresent
-
-if ($NewFolder.IsPresent -and $UseCurrentFolder.IsPresent) {
-    throw "Utilisez soit -NewFolder soit -UseCurrentFolder, pas les deux."
-}
-
-if (-not $useCurrent -and -not $NewFolder.IsPresent) {
-    do {
-        $answer = (Read-Host "Nouveau dossier projet ? (Y/N)").Trim()
-    } while ($answer -notmatch '^[YyNn]$')
-    if ($answer -match '^[Yy]$') { $NewFolder = $true } else { $useCurrent = $true }
-}
-
-if ($useCurrent) {
-    if ([string]::IsNullOrWhiteSpace($ParentPath)) {
-        $root = (Get-Location).Path
-    } else {
-        $root = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ParentPath)
-    }
-    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-        throw "Repertoire introuvable : $root"
-    }
-    if (Test-Path -LiteralPath (Join-Path $root "manage.py")) {
-        throw "Projet Django deja present (manage.py)."
-    }
-    Write-Host "  Cible : dossier courant" -ForegroundColor Green
-    Write-Host "  $root" -ForegroundColor Green
-} else {
-    $projectFolder = $ProjectName.Trim()
-    if ([string]::IsNullOrWhiteSpace($projectFolder)) {
-        do {
-            $projectFolder = (Read-Host "Nom du nouveau dossier").Trim()
-        } while ([string]::IsNullOrWhiteSpace($projectFolder))
-    }
-    if ($projectFolder -match '[<>:"/\\|?*]') {
-        throw "Nom de dossier invalide pour Windows."
-    }
-    $parentPath = if ([string]::IsNullOrWhiteSpace($ParentPath)) {
-        (Get-Location).Path
-    } else {
-        $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ParentPath)
-    }
-    if (-not (Test-Path -LiteralPath $parentPath)) {
-        throw "Dossier parent introuvable : $parentPath"
-    }
-    $root = Join-Path $parentPath $projectFolder
-    if (Test-Path -LiteralPath $root) {
-        $existing = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)
-        if ($existing.Count -gt 0) {
-            $i = 1
-            $candidate = ""
-            do {
-                $candidate = "${projectFolder}_$i"
-                $candidatePath = Join-Path $parentPath $candidate
-                $i++
-            } while (Test-Path -LiteralPath $candidatePath)
-
-            Write-Host "  Dossier deja non vide: $root" -ForegroundColor DarkYellow
-            Write-Host "  Nouveau nom propose automatiquement: $candidate" -ForegroundColor DarkYellow
-            $projectFolder = $candidate
-            $root = $candidatePath
-            New-Item -ItemType Directory -Path $root -Force | Out-Null
-            $createdNewFolder = $true
-        }
-    } else {
-        New-Item -ItemType Directory -Path $root -Force | Out-Null
-        $createdNewFolder = $true
-    }
-    Write-Host "  Nouveau dossier : $projectFolder" -ForegroundColor Green
-    Write-Host "  $root" -ForegroundColor Green
-}
-
-$uvName = (Split-Path -Leaf $root) -replace '[^a-zA-Z0-9_]', '_'
-if ($uvName -match '^[0-9]') { $uvName = "_$uvName" }
-
-$doFrontend = -not $SkipFrontend.IsPresent
-$doDocker = -not $SkipDocker.IsPresent
-
-Write-PipelineBanner -Subtitle "App: $AppName | Frontend: $doFrontend | Docker: $doDocker"
+$wantsNewFolder = $NewFolder.IsPresent
 
 try {
+    Write-PipelineBanner -Subtitle "Initialisation interactive"
+
+    if (-not (Test-PythonIdentifier $AppName)) {
+        throw "AppName invalide : lettres, chiffres, underscore uniquement."
+    }
+    if (-not (Resolve-ExecutablePath -Name "uv")) {
+        throw "uv introuvable dans le PATH. https://docs.astral.sh/uv/"
+    }
+    if ($wantsNewFolder -and $useCurrent) {
+        throw "Utilisez soit -NewFolder soit -UseCurrentFolder, pas les deux."
+    }
+
+    if (-not $NoInteractive.IsPresent -and -not $useCurrent -and -not $wantsNewFolder) {
+        do {
+            $answer = (Read-Host "Nouveau dossier projet ? (Y/N)").Trim()
+        } while ($answer -notmatch '^[YyNn]$')
+        if ($answer -match '^[Yy]$') { $wantsNewFolder = $true } else { $useCurrent = $true }
+    }
+
+    if ($NoInteractive.IsPresent -and -not $useCurrent -and -not $wantsNewFolder) {
+        if (-not [string]::IsNullOrWhiteSpace($ProjectName)) {
+            $wantsNewFolder = $true
+        } else {
+            $useCurrent = $true
+        }
+    }
+
+    if ($useCurrent) {
+        if ([string]::IsNullOrWhiteSpace($ParentPath)) {
+            $root = (Get-Location).Path
+        } else {
+            $root = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ParentPath)
+        }
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            throw "Repertoire introuvable : $root"
+        }
+        if (Test-Path -LiteralPath (Join-Path $root "manage.py")) {
+            throw "Projet Django deja present (manage.py)."
+        }
+        Write-Host "  Cible : dossier courant" -ForegroundColor Green
+        Write-Host "  $root" -ForegroundColor Green
+    } else {
+        $projectFolder = $ProjectName.Trim()
+        if ([string]::IsNullOrWhiteSpace($projectFolder)) {
+            do {
+                $projectFolder = (Read-Host "Nom du nouveau dossier").Trim()
+            } while ([string]::IsNullOrWhiteSpace($projectFolder))
+        }
+        if ($projectFolder -match '[<>:"/\\|?*]') {
+            throw "Nom de dossier invalide pour Windows."
+        }
+        $parentPath = if ([string]::IsNullOrWhiteSpace($ParentPath)) {
+            (Get-Location).Path
+        } else {
+            $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ParentPath)
+        }
+        if (-not (Test-Path -LiteralPath $parentPath)) {
+            throw "Dossier parent introuvable : $parentPath"
+        }
+
+        $resolved = Get-AvailableProjectPath -ParentPath $parentPath -BaseName $projectFolder
+        if ($resolved.Renamed) {
+            Write-Host "  Dossier indisponible ou non vide: $(Join-Path $parentPath $projectFolder)" -ForegroundColor DarkYellow
+            Write-Host "  Nom retenu automatiquement: $($resolved.Name)" -ForegroundColor DarkYellow
+        }
+        $projectFolder = $resolved.Name
+        $root = $resolved.Path
+        if (-not (Test-Path -LiteralPath $root)) {
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            $createdNewFolder = $true
+        } elseif (Test-DirectoryIsEmpty -Path $root) {
+            $createdNewFolder = $true
+        }
+        Write-Host "  Nouveau dossier : $projectFolder" -ForegroundColor Green
+        Write-Host "  $root" -ForegroundColor Green
+    }
+
+    $uvName = (Split-Path -Leaf $root) -replace '[^a-zA-Z0-9_]', '_'
+    if ($uvName -match '^[0-9]') { $uvName = "_$uvName" }
+
+    $doFrontend = -not $SkipFrontend.IsPresent
+    $doDocker = -not $SkipDocker.IsPresent
+
+    Write-PipelineBanner -Subtitle "App: $AppName | Frontend: $doFrontend | Docker: $doDocker"
+
     Start-PipelineStep -Title "Environnement uv" -Detail "init + dependances runtime et dev"
-    Invoke-CheckedCommand -Exe "uv" -Arguments @("init", "--name", $uvName) -WorkingDirectory $root -Quiet
-    Invoke-CheckedCommand -Exe "uv" -Arguments @(
+    if (-not (Test-Path -LiteralPath (Join-Path $root "pyproject.toml"))) {
+        Invoke-UvCommand -Arguments @("init", "--name", $uvName) -WorkingDirectory $root -Quiet
+    }
+    Invoke-UvCommand -Arguments @(
         "add", "django", "djangorestframework", "whitenoise", "django-cors-headers", "gunicorn"
     ) -WorkingDirectory $root -Quiet
-    Invoke-CheckedCommand -Exe "uv" -Arguments @(
+    Invoke-UvCommand -Arguments @(
         "add", "--dev", "ruff", "pytest", "pytest-django", "mypy", "django-stubs"
     ) -WorkingDirectory $root -Quiet
     $mainPy = Join-Path $root "main.py"
@@ -1447,7 +1582,7 @@ try {
     Write-TextFile -Path (Join-Path $root "apps\__init__.py") -Content @'
 """Applications metier du projet."""
 '@
-    Invoke-CheckedCommand -Exe "uv" -Arguments @(
+    Invoke-UvCommand -Arguments @(
         "run", "django-admin", "startapp", $AppName, "apps\$AppName"
     ) -WorkingDirectory $root -Quiet
     $appsPyPath = Join-Path $root "apps\$AppName\apps.py"
@@ -1549,30 +1684,26 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
         Write-Host "     Avertissement: -SkipMigrate detecte, migration ignoree." -ForegroundColor DarkYellow
         Complete-PipelineStep -Message "skipped"
     } else {
-        Invoke-CheckedCommand -Exe "uv" -Arguments @(
-            "run", "python", "manage.py", "migrate", "--noinput"
-        ) -WorkingDirectory $root -Quiet -TimeoutSeconds $MigrateTimeoutSeconds -EnvironmentOverrides @{
-            DJANGO_ENV = "dev"
-            DJANGO_DB_HOST = ""
-            DJANGO_DB_ENGINE = ""
-            DJANGO_DB_NAME = ""
-            DJANGO_DB_USER = ""
-            DJANGO_DB_PASSWORD = ""
-            DJANGO_DB_PORT = ""
-        }
+        Write-Host "     Migration SQLite locale (sans Postgres global)" -ForegroundColor DarkGray
+        Invoke-DjangoMigrate -Root $root -TimeoutSeconds $MigrateTimeoutSeconds
         Complete-PipelineStep -Message "migrations appliquees"
     }
 
     Write-PipelineSummary -Root $root -AppName $AppName -HasFrontend $doFrontend -HasDocker $doDocker
 }
 catch {
-    Write-Host ""
-    Write-Host "  [ECHEC] $($_.Exception.Message)" -ForegroundColor Red
-    if ($createdNewFolder -and (Test-Path -LiteralPath $root)) {
+    Write-Failure -Message $_.Exception.Message
+    if ($createdNewFolder -and -not [string]::IsNullOrWhiteSpace($root) -and (Test-Path -LiteralPath $root)) {
         Write-Host "  Nettoyage du dossier partiel : $root" -ForegroundColor DarkYellow
         Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
-    } elseif (-not $createdNewFolder) {
-        Write-Host "  Dossier courant conserve (pas de suppression auto)." -ForegroundColor DarkYellow
+    } elseif (-not $createdNewFolder -and -not [string]::IsNullOrWhiteSpace($root)) {
+        Write-Host "  Dossier conserve (pas de suppression auto)." -ForegroundColor DarkYellow
     }
-    throw
+}
+finally {
+    Restore-ShellPreferences
+}
+
+if ($script:ScaffoldFailed) {
+    exit 1
 }
