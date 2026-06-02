@@ -194,7 +194,8 @@ function Invoke-CheckedCommand {
         [Parameter(Mandatory)][string[]]$Arguments,
         [Parameter(Mandatory)][string]$WorkingDirectory,
         [switch]$Quiet,
-        [int]$TimeoutSeconds = 0
+        [int]$TimeoutSeconds = 0,
+        [hashtable]$EnvironmentOverrides = @{}
     )
     $exePath = Resolve-ExecutablePath -Name $Exe
     if (-not $exePath) {
@@ -210,7 +211,28 @@ function Invoke-CheckedCommand {
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
     $psi.WorkingDirectory = $WorkingDirectory
+    foreach ($key in $EnvironmentOverrides.Keys) {
+        $psi.EnvironmentVariables[$key] = [string]$EnvironmentOverrides[$key]
+    }
     $p = [System.Diagnostics.Process]::Start($psi)
+    $stdoutBuilder = New-Object System.Text.StringBuilder
+    $stderrBuilder = New-Object System.Text.StringBuilder
+    $outHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $args)
+        if ($null -ne $args.Data) {
+            [void]$stdoutBuilder.AppendLine($args.Data)
+        }
+    }
+    $errHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $args)
+        if ($null -ne $args.Data) {
+            [void]$stderrBuilder.AppendLine($args.Data)
+        }
+    }
+    $p.add_OutputDataReceived($outHandler)
+    $p.add_ErrorDataReceived($errHandler)
+    $p.BeginOutputReadLine()
+    $p.BeginErrorReadLine()
     if ($TimeoutSeconds -gt 0) {
         $timedOut = -not $p.WaitForExit($TimeoutSeconds * 1000)
         if ($timedOut) {
@@ -220,8 +242,9 @@ function Invoke-CheckedCommand {
     } else {
         $p.WaitForExit()
     }
-    $out = $p.StandardOutput.ReadToEnd()
-    $err = $p.StandardError.ReadToEnd()
+    $p.WaitForExit()
+    $out = $stdoutBuilder.ToString()
+    $err = $stderrBuilder.ToString()
     if ($p.ExitCode -ne 0) {
         if ($out) { Write-Host $out }
         if ($err) { Write-Host $err }
@@ -1369,9 +1392,22 @@ if ($useCurrent) {
     }
     $root = Join-Path $parentPath $projectFolder
     if (Test-Path -LiteralPath $root) {
-        $existing = Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue
-        if ($existing -and $existing.Count -gt 0) {
-            throw "Dossier non vide : $root"
+        $existing = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)
+        if ($existing.Count -gt 0) {
+            $i = 1
+            $candidate = ""
+            do {
+                $candidate = "${projectFolder}_$i"
+                $candidatePath = Join-Path $parentPath $candidate
+                $i++
+            } while (Test-Path -LiteralPath $candidatePath)
+
+            Write-Host "  Dossier deja non vide: $root" -ForegroundColor DarkYellow
+            Write-Host "  Nouveau nom propose automatiquement: $candidate" -ForegroundColor DarkYellow
+            $projectFolder = $candidate
+            $root = $candidatePath
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            $createdNewFolder = $true
         }
     } else {
         New-Item -ItemType Directory -Path $root -Force | Out-Null
@@ -1508,26 +1544,23 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
     Test-ProjectStructure -Root $root -AppName $AppName -ExpectFrontend $doFrontend -ExpectDocker $doDocker
     Complete-PipelineStep
 
+    Start-PipelineStep -Title "Migrations Django" -Detail "migrate initiale automatique"
     if ($SkipMigrate.IsPresent) {
-        Start-PipelineStep -Title "Migrations Django" -Detail "ignorees via -SkipMigrate"
+        Write-Host "     Avertissement: -SkipMigrate detecte, migration ignoree." -ForegroundColor DarkYellow
         Complete-PipelineStep -Message "skipped"
     } else {
-        Start-PipelineStep -Title "Migrations Django" -Detail "migrate initiale (sqlite forcee)"
-        $prevDbHost = $env:DJANGO_DB_HOST
-        try {
-            # Evite un blocage si DJANGO_DB_HOST global est defini vers un host inaccessible.
-            Remove-Item Env:DJANGO_DB_HOST -ErrorAction SilentlyContinue
-            Invoke-CheckedCommand -Exe "uv" -Arguments @(
-                "run", "python", "manage.py", "migrate", "--noinput"
-            ) -WorkingDirectory $root -Quiet -TimeoutSeconds $MigrateTimeoutSeconds
-        } finally {
-            if ($null -ne $prevDbHost) {
-                $env:DJANGO_DB_HOST = $prevDbHost
-            } else {
-                Remove-Item Env:DJANGO_DB_HOST -ErrorAction SilentlyContinue
-            }
+        Invoke-CheckedCommand -Exe "uv" -Arguments @(
+            "run", "python", "manage.py", "migrate", "--noinput"
+        ) -WorkingDirectory $root -Quiet -TimeoutSeconds $MigrateTimeoutSeconds -EnvironmentOverrides @{
+            DJANGO_ENV = "dev"
+            DJANGO_DB_HOST = ""
+            DJANGO_DB_ENGINE = ""
+            DJANGO_DB_NAME = ""
+            DJANGO_DB_USER = ""
+            DJANGO_DB_PASSWORD = ""
+            DJANGO_DB_PORT = ""
         }
-        Complete-PipelineStep
+        Complete-PipelineStep -Message "migrations appliquees"
     }
 
     Write-PipelineSummary -Root $root -AppName $AppName -HasFrontend $doFrontend -HasDocker $doDocker
