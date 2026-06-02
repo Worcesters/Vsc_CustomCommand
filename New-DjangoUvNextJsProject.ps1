@@ -31,6 +31,12 @@
 .PARAMETER InstallFrontendDeps
   Lance pnpm/npm install dans frontend/ (peut etre long).
 
+.PARAMETER SkipMigrate
+  Ignore la migration initiale Django.
+
+.PARAMETER MigrateTimeoutSeconds
+  Timeout de la migration initiale (defaut : 120s).
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1
 .EXAMPLE
@@ -52,7 +58,9 @@ param(
     [switch]$UseCurrentFolder,
     [switch]$SkipFrontend,
     [switch]$SkipDocker,
-    [switch]$InstallFrontendDeps
+    [switch]$InstallFrontendDeps,
+    [switch]$SkipMigrate,
+    [int]$MigrateTimeoutSeconds = 120
 )
 
 Set-StrictMode -Version Latest
@@ -185,7 +193,8 @@ function Invoke-CheckedCommand {
         [Parameter(Mandatory)][string]$Exe,
         [Parameter(Mandatory)][string[]]$Arguments,
         [Parameter(Mandatory)][string]$WorkingDirectory,
-        [switch]$Quiet
+        [switch]$Quiet,
+        [int]$TimeoutSeconds = 0
     )
     $exePath = Resolve-ExecutablePath -Name $Exe
     if (-not $exePath) {
@@ -202,9 +211,17 @@ function Invoke-CheckedCommand {
     $psi.CreateNoWindow = $true
     $psi.WorkingDirectory = $WorkingDirectory
     $p = [System.Diagnostics.Process]::Start($psi)
+    if ($TimeoutSeconds -gt 0) {
+        $timedOut = -not $p.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            try { $p.Kill() } catch {}
+            throw "Timeout (${TimeoutSeconds}s) : $Exe $($psi.Arguments)"
+        }
+    } else {
+        $p.WaitForExit()
+    }
     $out = $p.StandardOutput.ReadToEnd()
     $err = $p.StandardError.ReadToEnd()
-    $p.WaitForExit()
     if ($p.ExitCode -ne 0) {
         if ($out) { Write-Host $out }
         if ($err) { Write-Host $err }
@@ -1491,11 +1508,27 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
     Test-ProjectStructure -Root $root -AppName $AppName -ExpectFrontend $doFrontend -ExpectDocker $doDocker
     Complete-PipelineStep
 
-    Start-PipelineStep -Title "Migrations Django" -Detail "migrate initiale"
-    Invoke-CheckedCommand -Exe "uv" -Arguments @(
-        "run", "python", "manage.py", "migrate"
-    ) -WorkingDirectory $root -Quiet
-    Complete-PipelineStep
+    if ($SkipMigrate.IsPresent) {
+        Start-PipelineStep -Title "Migrations Django" -Detail "ignorees via -SkipMigrate"
+        Complete-PipelineStep -Message "skipped"
+    } else {
+        Start-PipelineStep -Title "Migrations Django" -Detail "migrate initiale (sqlite forcee)"
+        $prevDbHost = $env:DJANGO_DB_HOST
+        try {
+            # Evite un blocage si DJANGO_DB_HOST global est defini vers un host inaccessible.
+            Remove-Item Env:DJANGO_DB_HOST -ErrorAction SilentlyContinue
+            Invoke-CheckedCommand -Exe "uv" -Arguments @(
+                "run", "python", "manage.py", "migrate", "--noinput"
+            ) -WorkingDirectory $root -Quiet -TimeoutSeconds $MigrateTimeoutSeconds
+        } finally {
+            if ($null -ne $prevDbHost) {
+                $env:DJANGO_DB_HOST = $prevDbHost
+            } else {
+                Remove-Item Env:DJANGO_DB_HOST -ErrorAction SilentlyContinue
+            }
+        }
+        Complete-PipelineStep
+    }
 
     Write-PipelineSummary -Root $root -AppName $AppName -HasFrontend $doFrontend -HasDocker $doDocker
 }
