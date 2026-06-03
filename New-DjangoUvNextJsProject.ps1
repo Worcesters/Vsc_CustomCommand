@@ -1,11 +1,12 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Cree un monorepo Django + uv + Next.js + Docker avec pipeline visuel.
+  Cree un monorepo Django + uv + Next.js + Docker + admin custom Next.js.
 
 .DESCRIPTION
-  Pipeline en 12 etapes : uv, Django (Service Layer), SCSS 7-1, Next.js App Router,
-  Docker Compose, regles Cursor/skills, outillage qualite (ruff, pytest).
+  Pipeline : uv, Django (Service Layer), apps/admin_panel (API /api/admin/),
+  Next.js admin Flat High-End (/admin, /login), Docker Compose, Cursor rules, pytest.
+  Sans HTMX. Django /admin optionnel en dev (DJANGO_ADMIN_ENABLED).
 
 .PARAMETER ProjectName
   Nom du nouveau dossier (si -NewFolder).
@@ -28,8 +29,14 @@
 .PARAMETER SkipDocker
   Ignore Docker (Dockerfile, compose).
 
+.PARAMETER SkipFrontendDeps
+  N'installe pas les deps Node a l'init (pas de pnpm-lock.yaml ; Docker dev plus lent au 1er demarrage).
+
+.PARAMETER SkipCreatesuperuser
+  N'appelle pas manage.py createsuperuser apres les migrations.
+
 .PARAMETER InstallFrontendDeps
-  Lance pnpm/npm install dans frontend/ (peut etre long).
+  Obsolete : les deps front sont installees par defaut. Utiliser -SkipFrontendDeps pour ignorer.
 
 .PARAMETER SkipMigrate
   Ignore la migration initiale Django.
@@ -44,11 +51,11 @@
   Desactive les questions interactives (equivalent -NewFolder si ProjectName fourni).
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvNextJsProject.ps1
+  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvNextJsProject.ps1 -NewFolder mon_site -AppName blog
+  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1 -NewFolder mon_site -AppName core -NoInteractive
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvNextJsProject.ps1 -NewFolder mon_site -ParentPath E:\Projets -NoInteractive
+  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1 -NewFolder mon_site -ParentPath E:\Projets -NoInteractive
 #>
 
 [CmdletBinding()]
@@ -67,6 +74,8 @@ param(
     [switch]$SkipFrontend,
     [switch]$SkipDocker,
     [switch]$InstallFrontendDeps,
+    [switch]$SkipFrontendDeps,
+    [switch]$SkipCreatesuperuser,
     [switch]$SkipMigrate,
     [switch]$NoInteractive,
     [int]$MigrateTimeoutSeconds = 120,
@@ -123,7 +132,7 @@ function Get-AvailableProjectPath {
 }
 
 # --- Pipeline UI ---
-$script:PipelineTotal = 10
+$script:PipelineTotal = 11
 $script:PipelineStep = 0
 $script:StepWatch = $null
 
@@ -196,14 +205,14 @@ function Write-PipelineSummary {
         Write-Host ""
         Write-Host "  Frontend (dev) :" -ForegroundColor White
         Write-Host "    cd `"$Root\frontend`""
-        Write-Host "    pnpm install   # ou npm install"
-        Write-Host "    pnpm dev"
+        Write-Host "    pnpm dev   # deps installees a l'init (lockfile)"
     }
     if ($HasDocker) {
         Write-Host ""
         Write-Host "  Docker (stack complete) :" -ForegroundColor White
         Write-Host "    cd `"$Root`""
-        Write-Host "    docker compose -f docker-compose.dev.yml up --build"
+        Write-Host "    `$env:DOCKER_BUILDKIT=1; docker compose up --build"
+        Write-Host "    (deps front au build ; conteneur demarre sur pnpm dev)"
     }
     Write-Host ""
     Write-Host "  Cursor      : .cursor/AGENTS.md + .cursor/rules/" -ForegroundColor DarkGray
@@ -224,6 +233,481 @@ function Test-PythonIdentifier {
     return $reserved -notcontains $Name.ToLowerInvariant()
 }
 
+function Get-BrandCharteTokensScss {
+    @'
+:root {
+  --color-bg: #f8fafc;
+  --color-text: #0f172a;
+  --color-text-muted: #64748b;
+  --color-border: #e2e8f0;
+  --color-surface: #ffffff;
+
+  --primary-color: #45cdf7;
+  --primary-color-hover: #2ebde9;
+  --primary-color-active: #1aadc9;
+  --primary-color-on: #0f172a;
+
+  --secondary-color: #4574f7;
+  --secondary-color-hover: #3358c4;
+  --secondary-color-active: #2845a8;
+  --secondary-color-on: #ffffff;
+
+  --tertiary-color: #4574f7;
+  --tertiary-color-hover: #3358c4;
+  --tertiary-color-active: #2845a8;
+  --tertiary-color-on: #ffffff;
+
+  --accent-color: var(--tertiary-color);
+  --accent-color-hover: var(--tertiary-color-hover);
+  --accent-color-active: var(--tertiary-color-active);
+  --accent-color-on: var(--tertiary-color-on);
+
+  --success-color: #16a34a;
+  --warning-color: #ca8a04;
+  --danger-color: #dc2626;
+  --info-color: #45cdf7;
+
+  --focus-ring: 0 0 0 2px #45cdf7;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --font-sans: "Inter", "Geist", system-ui, sans-serif;
+}
+
+[data-theme="dark"] {
+  --color-bg: #0f172a;
+  --color-text: #f8fafc;
+  --color-text-muted: #94a3b8;
+  --color-border: #334155;
+  --color-surface: #1e293b;
+}
+'@
+}
+
+function Get-BrandButtonsScss {
+    @'
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn--primary {
+  background: var(--primary-color);
+  color: var(--primary-color-on);
+}
+
+.btn--primary:hover {
+  background: var(--primary-color-hover);
+}
+
+.btn--secondary {
+  background: var(--secondary-color);
+  color: var(--secondary-color-on);
+}
+
+.btn--secondary:hover {
+  background: var(--secondary-color-hover);
+}
+
+.btn--tertiary {
+  background: var(--tertiary-color);
+  color: var(--tertiary-color-on);
+}
+
+.btn--tertiary:hover {
+  background: var(--tertiary-color-hover);
+}
+'@
+}
+
+function Get-BrandHomePageScss {
+    @'
+.page-home {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-4);
+  max-width: 64rem;
+  margin: 0 auto;
+}
+
+.page-home__hero {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-8);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--primary-color) 18%, var(--color-surface)),
+    color-mix(in srgb, var(--secondary-color) 12%, var(--color-surface))
+  );
+}
+
+.page-home__eyebrow {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--secondary-color);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.page-home__title {
+  margin: 0;
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
+  line-height: 1.2;
+}
+
+.page-home__lead {
+  margin: 0;
+  max-width: 42rem;
+  color: var(--color-text-muted);
+}
+
+.page-home__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.page-home__grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+@media (min-width: 48rem) {
+  .page-home__grid {
+    flex-direction: row;
+  }
+}
+
+.page-home__card {
+  flex: 1;
+  padding: var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  border-top: 3px solid var(--primary-color);
+}
+
+.page-home__card-title {
+  margin: 0 0 var(--space-2);
+  color: var(--secondary-color);
+}
+
+.page-home__card-text {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.site-header {
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-4) var(--space-6);
+  background: var(--color-surface);
+}
+
+.site-header__brand {
+  font-weight: 700;
+  color: var(--secondary-color);
+}
+
+.layout-main {
+  min-height: calc(100vh - 4rem);
+}
+
+.page-auth {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  min-height: 100vh;
+  padding: var(--space-8);
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--primary-color) 14%, var(--color-bg)),
+    var(--color-bg)
+  );
+}
+
+.page-auth__title {
+  margin: 0;
+  color: var(--secondary-color);
+}
+
+.page-auth__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: min(24rem, 100%);
+}
+
+.page-auth__label {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.page-auth__input {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.page-auth__error {
+  margin: 0;
+  color: var(--danger-color);
+}
+'@
+}
+
+function Get-BrandAdminScss {
+    @'
+@use "../tokens";
+
+.admin-shell {
+  display: flex;
+  min-height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+.admin-shell__sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 14rem;
+  border-right: 1px solid var(--color-border);
+  padding: var(--space-4);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--secondary-color) 8%, var(--color-surface)),
+    var(--color-surface)
+  );
+  border-top: 4px solid var(--primary-color);
+}
+
+.admin-shell__title {
+  margin: 0;
+  font-size: 1.125rem;
+  color: var(--secondary-color);
+}
+
+.admin-shell__main {
+  flex: 1;
+  padding: var(--space-6);
+}
+
+.admin-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.admin-nav__link {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+
+.admin-nav__link:hover {
+  color: var(--secondary-color);
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+}
+
+.admin-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border-left: 3px solid var(--tertiary-color);
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.admin-table th {
+  color: var(--secondary-color);
+  font-weight: 600;
+}
+
+.admin-table th,
+.admin-table td {
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-2);
+  text-align: left;
+}
+
+.admin-inline-links {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.admin-inline-links__sep {
+  color: var(--color-text-muted);
+}
+
+.admin-registry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.admin-registry__item {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--color-surface);
+}
+
+.schema-explorer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.schema-explorer__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.schema-explorer__layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+@media (min-width: 48rem) {
+  .schema-explorer__layout {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+}
+
+.schema-explorer__fields {
+  flex: 0 0 18rem;
+  max-width: 100%;
+}
+
+.schema-explorer__diagram {
+  flex: 1;
+  min-width: 0;
+}
+
+.schema-flow {
+  width: 100%;
+  height: 28rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-bg) 92%, var(--color-surface));
+}
+
+.schema-flow__node {
+  min-width: 9rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.schema-flow__node--focus {
+  border-color: var(--secondary-color);
+  border-width: 2px;
+}
+
+.schema-flow__node-label {
+  display: block;
+  font-weight: 600;
+  color: var(--secondary-color);
+}
+
+.schema-flow__node-id {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.schema-relations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.schema-relations__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.schema-relations__link {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  color: var(--color-text);
+}
+
+.schema-relations__link:hover {
+  border-color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+}
+
+.schema-relations__badge {
+  font-size: 0.75rem;
+  padding: 0.125rem var(--space-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--tertiary-color) 18%, transparent);
+  color: var(--secondary-color);
+}
+
+.admin-export details pre {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  overflow-x: auto;
+  font-size: 0.8125rem;
+}
+'@
+}
+
 function Write-TextFile {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -233,8 +717,10 @@ function Write-TextFile {
     if ($dir -and -not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
+    # LF uniquement : evite "set: Illegal option -" sous Linux (CRLF / shebang\r).
+    $normalized = $Content -replace "`r`n", "`n" -replace "`r", "`n"
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+    [System.IO.File]::WriteAllText($Path, $normalized, $utf8NoBom)
 }
 
 function Resolve-ExecutablePath {
@@ -388,6 +874,73 @@ function Invoke-DjangoMigrate {
     }
 }
 
+function Invoke-DjangoCreatesuperuser {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [switch]$NoInteractive
+    )
+
+    $pythonExe = Join-Path $Root ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $pythonExe)) {
+        throw "Python venv introuvable. Lancez d'abord: uv sync"
+    }
+
+    $savedEnv = @{}
+    foreach ($key in $script:DbEnvKeys) {
+        $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+        if ($null -ne $item) {
+            $savedEnv[$key] = $item.Value
+            Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+        }
+    }
+
+    try {
+        $env:DJANGO_ENV = "dev"
+        $env:DJANGO_SETTINGS_MODULE = "config.settings"
+
+        if ($NoInteractive) {
+            $user = $env:DJANGO_SUPERUSER_USERNAME
+            $pass = $env:DJANGO_SUPERUSER_PASSWORD
+            $email = $env:DJANGO_SUPERUSER_EMAIL
+            if ([string]::IsNullOrWhiteSpace($user) -or [string]::IsNullOrWhiteSpace($pass)) {
+                Write-Host "     Mode non interactif : definir DJANGO_SUPERUSER_USERNAME, DJANGO_SUPERUSER_PASSWORD (et optionnellement DJANGO_SUPERUSER_EMAIL) puis relancer createsuperuser." -ForegroundColor DarkYellow
+                return
+            }
+            if ([string]::IsNullOrWhiteSpace($email)) {
+                $email = "$user@local.test"
+            }
+            $env:DJANGO_SUPERUSER_USERNAME = $user
+            $env:DJANGO_SUPERUSER_PASSWORD = $pass
+            $env:DJANGO_SUPERUSER_EMAIL = $email
+            Invoke-NativeCli -Exe $pythonExe -Arguments @(
+                "manage.py", "createsuperuser", "--noinput"
+            ) -WorkingDirectory $Root -Quiet
+            Write-Host "     Superuser cree (non interactif) : $user" -ForegroundColor Green
+            return
+        }
+
+        Write-Host ""
+        Write-Host "  Compte superuser requis pour /admin (DataStudio)" -ForegroundColor Cyan
+        Write-Host "  Laissez vide uniquement si vous le creerez plus tard." -ForegroundColor DarkGray
+        $skip = (Read-Host "Creer un superuser maintenant ? (O/n)").Trim()
+        if ($skip -match '^[Nn]') {
+            Write-Host "     createsuperuser ignore - plus tard : uv run python manage.py createsuperuser" -ForegroundColor DarkYellow
+            return
+        }
+
+        Invoke-NativeCli -Exe $pythonExe -Arguments @(
+            "manage.py", "createsuperuser"
+        ) -WorkingDirectory $Root
+    } finally {
+        foreach ($key in $script:DbEnvKeys) {
+            Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+        }
+        foreach ($key in $savedEnv.Keys) {
+            Set-Item -Path "Env:$key" -Value $savedEnv[$key]
+        }
+    }
+}
+
 function New-DjangoConfigPackage {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -486,7 +1039,15 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "apps.$AppName",
+    "apps.admin_panel",
 ]
+
+# Admin Django natif : fallback dev uniquement (desactive en prod par defaut)
+DJANGO_ADMIN_ENABLED = os.environ.get("DJANGO_ADMIN_ENABLED", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -555,14 +1116,26 @@ REST_FRAMEWORK = {
     "DEFAULT_PARSER_CLASSES": [
         "rest_framework.parsers.JSONParser",
     ],
-    "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAuthenticatedOrReadOnly",
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
     ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+}
+
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+    "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
 _cors = os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
 CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()]
 CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
 "@
     Write-TextFile -Path (Join-Path $settingsDir "base.py") -Content $baseSettings
 
@@ -571,7 +1144,7 @@ from .base import *  # noqa: F403
 import os
 
 DEBUG = True
-ALLOWED_HOSTS = ["localhost", "127.0.0.1", "web"]
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "web", "host.docker.internal"]
 
 _use_pg = os.environ.get("DJANGO_USE_POSTGRES", "").lower() in ("1", "true", "yes")
 if _use_pg and os.environ.get("DJANGO_DB_HOST"):
@@ -596,6 +1169,9 @@ else:
     }
 
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+
+# Fallback django.contrib.admin en dev local
+DJANGO_ADMIN_ENABLED = True
 '@
     Write-TextFile -Path (Join-Path $settingsDir "dev.py") -Content $devSettings
 
@@ -655,17 +1231,44 @@ STORAGES = {
 SECURE_SSL_REDIRECT = os.environ.get("DJANGO_SECURE_SSL_REDIRECT", "true").lower() == "true"
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
+
+DJANGO_ADMIN_ENABLED = False
 '@
     Write-TextFile -Path (Join-Path $settingsDir "prod.py") -Content $prodSettings
 
+    Write-TextFile -Path (Join-Path $configDir "health.py") -Content @'
+"""Sonde de disponibilite (Docker / load balancer)."""
+
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+
+class HealthCheckView(APIView):
+    """GET /api/health/ — sans authentification."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request) -> Response:
+        return Response({"status": "ok"})
+'@
+
     $configUrls = @"
+from django.conf import settings
 from django.contrib import admin
 from django.urls import include, path
 
+from config.health import HealthCheckView
+
 urlpatterns = [
-    path("admin/", admin.site.urls),
+    path("api/health/", HealthCheckView.as_view(), name="health"),
+    path("api/auth/", include("apps.admin_panel.auth_urls")),
+    path("api/admin/", include("apps.admin_panel.urls")),
     path("", include("apps.$AppName.urls")),
 ]
+
+if getattr(settings, "DJANGO_ADMIN_ENABLED", False):
+    urlpatterns.insert(0, path("django-admin/", admin.site.urls))
 "@
     Write-TextFile -Path (Join-Path $configDir "urls.py") -Content $configUrls
 }
@@ -677,7 +1280,7 @@ function New-AppServiceLayer {
     )
 
     $appDir = Join-Path $Root "apps\$AppName"
-    New-Item -ItemType Directory -Path (Join-Path $appDir "templates\$AppName\partials") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $appDir "templates\$AppName") -Force | Out-Null
 
     Write-TextFile -Path (Join-Path $appDir "services.py") -Content @'
 """Logique d'ecriture (couche service)."""
@@ -728,7 +1331,7 @@ from django.views.generic import TemplateView
 
 
 class HomeView(TemplateView):
-    '''Page d'accueil admin/HTMX (CBV).
+    '''Page d'accueil minimale (legacy template).
 
     MRO:
     1. TemplateView.get -> rendu template $AppName/home.html
@@ -741,13 +1344,683 @@ class HomeView(TemplateView):
 {% extends "base.html" %}
 {% block title %}Accueil{% endblock %}
 {% block content %}
-  <section class="page-home">
-    <h1 class="page-home__title">Bienvenue</h1>
-    <p class="page-home__lead">Monorepo Django + uv + Next.js pret.</p>
-    <p>UI produit : <code>frontend/</code> (Next.js). Admin/HTMX : ce template.</p>
-  </section>
+  <main class="page-home">
+    <header class="page-home__hero">
+      <p class="page-home__eyebrow">Django + uv + Next.js</p>
+      <h1 class="page-home__title">Bienvenue sur votre application</h1>
+      <p class="page-home__lead">
+        UI produit et administration via Next.js. API metier exposee par Django/DRF.
+      </p>
+      <div class="page-home__actions">
+        <a class="btn btn--primary" href="http://localhost:3000/admin">Administration</a>
+        <a class="btn btn--secondary" href="http://localhost:3000/login">Connexion</a>
+      </div>
+    </header>
+    <section class="page-home__grid">
+      <article class="page-home__card">
+        <h2 class="page-home__card-title">API Django</h2>
+        <p class="page-home__card-text">Service Layer, DRF et migrations ORM.</p>
+      </article>
+      <article class="page-home__card">
+        <h2 class="page-home__card-title">Admin custom</h2>
+        <p class="page-home__card-text">Registry, schema et CRUD (roadmap V1-V3).</p>
+      </article>
+    </section>
+  </main>
 {% endblock %}
 '@
+}
+
+function New-CoreModels {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$AppName
+    )
+    $modelsPath = Join-Path $Root "apps\$AppName\models.py"
+    Write-TextFile -Path $modelsPath -Content @"
+from __future__ import annotations
+
+from django.db import models
+
+
+class Transaction(models.Model):
+    '''Exemple de model metier enregistre dans l'admin custom.'''
+
+    label = models.CharField(max_length=120)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3, default="EUR")
+    status = models.CharField(max_length=32, default="draft")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.label} ({self.amount} {self.currency})"
+"@
+}
+
+function New-AdminPanelBackend {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$AppName
+    )
+
+    $panelDir = Join-Path $Root "apps\admin_panel"
+    New-Item -ItemType Directory -Path (Join-Path $panelDir "tests") -Force | Out-Null
+
+    Write-TextFile -Path (Join-Path $panelDir "apps.py") -Content @'
+from django.apps import AppConfig
+
+
+class AdminPanelConfig(AppConfig):
+    """Panneau admin custom (API DRF + registry whitelist)."""
+
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "apps.admin_panel"
+    verbose_name = "Admin Panel"
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "registry.py") -Content @"
+from __future__ import annotations
+
+from typing import TypedDict
+
+
+class RegistryEntry(TypedDict):
+    app_label: str
+    model_name: str
+    label: str
+    permissions: list[str]
+
+
+# Whitelist des models exposes dans l'admin Next.js (pas de DDL via UI).
+ADMIN_MODEL_REGISTRY: list[RegistryEntry] = [
+    {
+        "app_label": "$AppName",
+        "model_name": "transaction",
+        "label": "Transactions",
+        "permissions": ["list", "create", "edit", "delete", "schema"],
+    },
+]
+"@
+
+    Write-TextFile -Path (Join-Path $panelDir "selectors.py") -Content @'
+from __future__ import annotations
+
+from django.apps import apps
+from django.db import models
+
+from .registry import ADMIN_MODEL_REGISTRY, RegistryEntry
+
+
+def list_registry_entries() -> list[RegistryEntry]:
+    """Retourne la whitelist des models admin."""
+    return list(ADMIN_MODEL_REGISTRY)
+
+
+def get_model_schema(app_label: str, model_name: str) -> dict[str, object]:
+    """Schema d'un model (champs, types, contraintes, relations)."""
+    model = apps.get_model(app_label, model_name)
+    fields: list[dict[str, object]] = []
+    for field in model._meta.get_fields():
+        if getattr(field, "auto_created", False) and not field.concrete:
+            continue
+        info: dict[str, object] = {
+            "name": field.name,
+            "type": field.__class__.__name__,
+            "nullable": getattr(field, "null", False),
+            "unique": getattr(field, "unique", False),
+        }
+        if isinstance(field, (models.ForeignKey, models.OneToOneField)):
+            info["relation"] = "FK"
+            info["related_model"] = field.related_model._meta.label_lower
+        elif isinstance(field, models.ManyToManyField):
+            info["relation"] = "M2M"
+            info["related_model"] = field.related_model._meta.label_lower
+        fields.append(info)
+    relations: list[dict[str, object]] = []
+    for field in fields:
+        related = field.get("related_model")
+        if not related or "relation" not in field:
+            continue
+        rel_app, _, rel_model = str(related).partition(".")
+        relations.append(
+            {
+                "field": field["name"],
+                "type": field["relation"],
+                "app_label": rel_app,
+                "model_name": rel_model,
+                "target_id": str(related),
+            }
+        )
+    return {
+        "app_label": app_label,
+        "model_name": model_name,
+        "table": model._meta.db_table,
+        "fields": fields,
+        "relations": relations,
+        "incoming": _list_incoming_relations(app_label, model_name),
+    }
+
+
+def _list_incoming_relations(app_label: str, model_name: str) -> list[dict[str, object]]:
+    """Relations entrantes (autres tables pointant vers ce model)."""
+    target = f"{app_label}.{model_name}"
+    incoming: list[dict[str, object]] = []
+    for entry in ADMIN_MODEL_REGISTRY:
+        peer_model = apps.get_model(entry["app_label"], entry["model_name"])
+        for field in peer_model._meta.get_fields():
+            if getattr(field, "auto_created", False) and not field.concrete:
+                continue
+            if not isinstance(
+                field, (models.ForeignKey, models.OneToOneField, models.ManyToManyField)
+            ):
+                continue
+            if field.related_model._meta.label_lower != target:
+                continue
+            rel_type = "M2M" if isinstance(field, models.ManyToManyField) else "FK"
+            incoming.append(
+                {
+                    "field": field.name,
+                    "type": rel_type,
+                    "from_app_label": entry["app_label"],
+                    "from_model_name": entry["model_name"],
+                    "from_id": f"{entry['app_label']}.{entry['model_name']}",
+                }
+            )
+    return incoming
+
+
+def get_global_schema() -> dict[str, object]:
+    """Schema global + liaisons pour diagramme."""
+    nodes: list[dict[str, str]] = []
+    edges: list[dict[str, str]] = []
+    for entry in ADMIN_MODEL_REGISTRY:
+        schema = get_model_schema(entry["app_label"], entry["model_name"])
+        node_id = f"{entry['app_label']}.{entry['model_name']}"
+        nodes.append(
+            {
+                "id": node_id,
+                "label": entry["label"],
+                "app_label": entry["app_label"],
+                "model_name": entry["model_name"],
+            }
+        )
+        for field in schema["fields"]:
+            if "relation" in field and "related_model" in field:
+                edges.append(
+                    {
+                        "from": node_id,
+                        "to": str(field["related_model"]),
+                        "type": str(field["relation"]),
+                        "field": str(field["name"]),
+                    }
+                )
+    return {"nodes": nodes, "edges": edges}
+
+
+def export_schema_mermaid() -> str:
+    """Export Mermaid ER (fichier .md)."""
+    lines = ["```mermaid", "erDiagram"]
+    for entry in ADMIN_MODEL_REGISTRY:
+        schema = get_model_schema(entry["app_label"], entry["model_name"])
+        entity = f"{entry['app_label']}_{entry['model_name']}".upper()
+        lines.append(f"    {entity} {{")
+        for field in schema["fields"]:
+            if "relation" in field:
+                continue
+            lines.append(f"        {field['type']} {field['name']}")
+        lines.append("    }")
+    for entry in ADMIN_MODEL_REGISTRY:
+        schema = get_model_schema(entry["app_label"], entry["model_name"])
+        src = f"{entry['app_label']}_{entry['model_name']}".upper()
+        for field in schema["fields"]:
+            if field.get("relation") == "FK" and field.get("related_model"):
+                dst = str(field["related_model"]).replace(".", "_").upper()
+                lines.append(f"    {src} }}o--|| {dst} : {field['name']}")
+    lines.append("```")
+    return "\n".join(lines)
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "services.py") -Content @'
+from __future__ import annotations
+
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from django.apps import apps as django_apps
+from django.db import models
+from django.utils.dateparse import parse_date, parse_datetime
+
+from apps.admin_panel.registry import ADMIN_MODEL_REGISTRY
+
+
+class AdminModelNotAllowedError(LookupError):
+    """Model hors whitelist registry admin."""
+
+
+def _resolve_model(app_label: str, model_name: str) -> type[models.Model]:
+    """Retourne le model Django si present dans le registry admin."""
+    allowed = any(
+        e["app_label"] == app_label and e["model_name"] == model_name
+        for e in ADMIN_MODEL_REGISTRY
+    )
+    if not allowed:
+        raise AdminModelNotAllowedError(f"{app_label}.{model_name}")
+    return django_apps.get_model(app_label, model_name)
+
+
+def _editable_fields(model: type[models.Model]) -> set[str]:
+    return {f.name for f in model._meta.concrete_fields if f.editable}
+
+
+def _serialize_value(value: object) -> object:
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def serialize_instance(model: type[models.Model], instance: models.Model) -> dict[str, Any]:
+    """Serialise une instance ORM en dict JSON-friendly."""
+    row: dict[str, Any] = {}
+    for field in model._meta.concrete_fields:
+        row[field.name] = _serialize_value(getattr(instance, field.attname))
+    return row
+
+
+def _coerce_field_value(field: models.Field, raw: object) -> object:
+    """Convertit une valeur API vers le type ORM."""
+    if raw is None or raw == "":
+        if field.null:
+            return None
+        return raw
+    if isinstance(field, models.BooleanField):
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).lower() in ("1", "true", "yes", "on")
+    if isinstance(field, (models.IntegerField, models.BigIntegerField, models.SmallIntegerField)):
+        return int(raw)
+    if isinstance(field, models.DecimalField):
+        try:
+            return Decimal(str(raw))
+        except InvalidOperation as exc:
+            raise ValueError(f"Valeur decimale invalide pour {field.name}") from exc
+    if isinstance(field, models.DateTimeField):
+        parsed = parse_datetime(str(raw))
+        if parsed is None:
+            raise ValueError(f"Date/heure invalide pour {field.name}")
+        return parsed
+    if isinstance(field, models.DateField):
+        parsed = parse_date(str(raw))
+        if parsed is None:
+            raise ValueError(f"Date invalide pour {field.name}")
+        return parsed
+    return raw
+
+
+def _clean_payload(
+    model: type[models.Model],
+    payload: dict[str, Any],
+    *,
+    exclude_pk: bool = False,
+) -> dict[str, Any]:
+    allowed = _editable_fields(model)
+    cleaned: dict[str, Any] = {}
+    pk_name = model._meta.pk.name
+    for key, value in payload.items():
+        if key not in allowed:
+            continue
+        if exclude_pk and key == pk_name:
+            continue
+        field = model._meta.get_field(key)
+        cleaned[key] = _coerce_field_value(field, value)
+    return cleaned
+
+
+def list_model_rows(app_label: str, model_name: str, *, limit: int = 500) -> dict[str, Any]:
+    """Liste les lignes d'un model (lecture ORM pour grille admin)."""
+    model = _resolve_model(app_label, model_name)
+    rows = [
+        serialize_instance(model, obj) for obj in model.objects.all()[:limit]
+    ]
+    return {"results": rows, "count": model.objects.count(), "pk_field": model._meta.pk.name}
+
+
+def create_model_row(app_label: str, model_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Cree une ligne via ORM (whitelist registry)."""
+    model = _resolve_model(app_label, model_name)
+    data = _clean_payload(model, payload, exclude_pk=True)
+    instance = model.objects.create(**data)
+    return serialize_instance(model, instance)
+
+
+def update_model_row(
+    app_label: str,
+    model_name: str,
+    pk: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Met a jour une ligne via ORM."""
+    model = _resolve_model(app_label, model_name)
+    instance = model.objects.get(pk=pk)
+    data = _clean_payload(model, payload, exclude_pk=True)
+    for name, value in data.items():
+        setattr(instance, name, value)
+    instance.save()
+    return serialize_instance(model, instance)
+
+
+def delete_model_row(app_label: str, model_name: str, pk: str) -> None:
+    """Supprime une ligne via ORM."""
+    model = _resolve_model(app_label, model_name)
+    model.objects.filter(pk=pk).delete()
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "serializers.py") -Content @'
+"""Serializers DRF pour l'admin panel."""
+
+from rest_framework import serializers
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "permissions.py") -Content @'
+"""Permissions DRF pour l''admin panel."""
+
+from __future__ import annotations
+
+from rest_framework.permissions import BasePermission
+from rest_framework.request import Request
+from rest_framework.views import APIView
+
+
+class IsSuperUser(BasePermission):
+    """Acces reserve aux superusers Django."""
+
+    message = "Superuser requis."
+
+    def has_permission(self, request: Request, view: APIView) -> bool:
+        user = request.user
+        return bool(
+            user and user.is_authenticated and getattr(user, "is_superuser", False)
+        )
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "auth_views.py") -Content @'
+"""Authentification admin (JWT, superuser uniquement)."""
+
+from __future__ import annotations
+
+from django.contrib.auth import authenticate
+from rest_framework import status
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.request import Request
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from .permissions import IsSuperUser
+
+
+class AdminLoginView(APIView):
+    """POST /api/auth/login/ — JWT si superuser."""
+
+    permission_classes = [AllowAny]
+
+    def post(self, request: Request) -> Response:
+        username = request.data.get("username", "")
+        password = request.data.get("password", "")
+        user = authenticate(
+            request=request,
+            username=username,
+            password=password,
+        )
+        if user is None or not user.is_superuser:
+            return Response(
+                {"detail": "Identifiants invalides ou acces refuse."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+                "user": {
+                    "username": user.username,
+                    "is_superuser": user.is_superuser,
+                },
+            }
+        )
+
+
+class AdminSessionView(APIView):
+    """GET /api/auth/session/ — profil superuser connecte."""
+
+    permission_classes = [IsAuthenticated, IsSuperUser]
+
+    def get(self, request: Request) -> Response:
+        user = request.user
+        return Response(
+            {
+                "username": user.username,
+                "is_superuser": user.is_superuser,
+            }
+        )
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "auth_urls.py") -Content @'
+"""Routes auth admin panel."""
+
+from django.urls import path
+
+from . import auth_views
+
+urlpatterns = [
+    path("login/", auth_views.AdminLoginView.as_view(), name="admin-login"),
+    path("session/", auth_views.AdminSessionView.as_view(), name="admin-session"),
+]
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "views.py") -Content @'
+from __future__ import annotations
+
+from django.core.exceptions import ObjectDoesNotExist
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.request import Request
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from . import selectors
+from .permissions import IsSuperUser
+
+_ADMIN_PERMS = [IsAuthenticated, IsSuperUser]
+
+
+class RegistryListView(APIView):
+    """GET /api/admin/registry/ — liste whitelist models."""
+
+    permission_classes = _ADMIN_PERMS
+
+    def get(self, request: Request) -> Response:
+        return Response({"results": selectors.list_registry_entries()})
+
+
+class SchemaGlobalView(APIView):
+    """GET /api/admin/schema/ — schema global + liaisons."""
+
+    permission_classes = _ADMIN_PERMS
+
+    def get(self, request: Request) -> Response:
+        return Response(selectors.get_global_schema())
+
+
+class SchemaModelView(APIView):
+    """GET /api/admin/schema/<app>/<model>/ — schema d'une table."""
+
+    permission_classes = _ADMIN_PERMS
+
+    def get(self, request: Request, app_label: str, model_name: str) -> Response:
+        return Response(selectors.get_model_schema(app_label, model_name))
+
+
+class SchemaExportView(APIView):
+    """GET /api/admin/schema/export/ — Mermaid markdown (+ SVG a generer cote front V2)."""
+
+    permission_classes = _ADMIN_PERMS
+
+    def get(self, request: Request) -> Response:
+        mermaid = selectors.export_schema_mermaid()
+        return Response(
+            {
+                "format": "mermaid",
+                "markdown": mermaid,
+                "svg_hint": "Telecharger via frontend/admin/schema (V2)",
+            }
+        )
+
+
+class ModelRowsListView(APIView):
+    """GET/POST /api/admin/models/<app>/<model>/ — grille admin CRUD."""
+
+    permission_classes = _ADMIN_PERMS
+
+    def get(self, request: Request, app_label: str, model_name: str) -> Response:
+        from .services import AdminModelNotAllowedError, list_model_rows
+
+        try:
+            return Response(list_model_rows(app_label, model_name))
+        except AdminModelNotAllowedError:
+            return Response({"detail": "Model non autorise"}, status=status.HTTP_404_NOT_FOUND)
+
+    def post(self, request: Request, app_label: str, model_name: str) -> Response:
+        from .services import AdminModelNotAllowedError, create_model_row
+
+        try:
+            row = create_model_row(app_label, model_name, request.data)
+            return Response(row, status=status.HTTP_201_CREATED)
+        except AdminModelNotAllowedError:
+            return Response({"detail": "Model non autorise"}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ModelRowDetailView(APIView):
+    """PATCH/DELETE /api/admin/models/<app>/<model>/<pk>/."""
+
+    permission_classes = _ADMIN_PERMS
+
+    def patch(
+        self,
+        request: Request,
+        app_label: str,
+        model_name: str,
+        pk: str,
+    ) -> Response:
+        from .services import AdminModelNotAllowedError, update_model_row
+
+        try:
+            row = update_model_row(app_label, model_name, pk, request.data)
+            return Response(row)
+        except AdminModelNotAllowedError:
+            return Response({"detail": "Model non autorise"}, status=status.HTTP_404_NOT_FOUND)
+        except ObjectDoesNotExist:
+            return Response({"detail": "Ligne introuvable"}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(
+        self,
+        request: Request,
+        app_label: str,
+        model_name: str,
+        pk: str,
+    ) -> Response:
+        from .services import AdminModelNotAllowedError, delete_model_row
+
+        try:
+            delete_model_row(app_label, model_name, pk)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except AdminModelNotAllowedError:
+            return Response({"detail": "Model non autorise"}, status=status.HTTP_404_NOT_FOUND)
+        except ObjectDoesNotExist:
+            return Response({"detail": "Ligne introuvable"}, status=status.HTTP_404_NOT_FOUND)
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "urls.py") -Content @'
+from django.urls import path
+
+from . import views
+
+app_name = "admin_panel"
+
+urlpatterns = [
+    path("registry/", views.RegistryListView.as_view(), name="registry"),
+    path("schema/", views.SchemaGlobalView.as_view(), name="schema-global"),
+    path("schema/export/", views.SchemaExportView.as_view(), name="schema-export"),
+    path(
+        "schema/<str:app_label>/<str:model_name>/",
+        views.SchemaModelView.as_view(),
+        name="schema-model",
+    ),
+    path(
+        "models/<str:app_label>/<str:model_name>/",
+        views.ModelRowsListView.as_view(),
+        name="model-rows",
+    ),
+    path(
+        "models/<str:app_label>/<str:model_name>/<str:pk>/",
+        views.ModelRowDetailView.as_view(),
+        name="model-row-detail",
+    ),
+]
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "admin.py") -Content @'
+"""Django admin natif non utilise pour les models registry (admin Next.js)."""
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "models.py") -Content @'
+"""Pas de tables admin_panel — schema via models metier + migrations uniquement."""
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "tests\test_registry.py") -Content @'
+"""Tests registry admin panel."""
+
+from apps.admin_panel.registry import ADMIN_MODEL_REGISTRY
+from apps.admin_panel.selectors import list_registry_entries
+
+
+def test_registry_contains_transaction() -> None:
+    entries = list_registry_entries()
+    assert any(e["model_name"] == "transaction" for e in entries)
+
+
+def test_registry_whitelist_not_empty() -> None:
+    assert len(ADMIN_MODEL_REGISTRY) >= 1
+'@
+
+    Write-TextFile -Path (Join-Path $panelDir "tests\test_schema.py") -Content @"
+"""Tests schema admin panel."""
+
+import pytest
+
+from apps.admin_panel.selectors import export_schema_mermaid, get_model_schema
+
+
+@pytest.mark.django_db
+def test_model_schema_transaction_fields() -> None:
+    schema = get_model_schema("$AppName", "transaction")
+    assert "relations" in schema
+    assert "incoming" in schema
+    names = {f["name"] for f in schema["fields"]}
+    assert "amount" in names
+    assert "label" in names
+
+
+def test_export_mermaid_contains_erdiagram() -> None:
+    md = export_schema_mermaid()
+    assert "erDiagram" in md
+"@
 }
 
 function New-StaticScssLayout {
@@ -775,62 +2048,23 @@ function New-StaticScssLayout {
 }
 '@
 
-    Write-TextFile -Path (Join-Path $scssRoot "base\_root.scss") -Content @'
-:root {
-  --color-bg: #fafafa;
-  --color-text: #18181b;
-  --color-text-muted: #71717a;
-  --color-border: #e4e4e7;
-  --color-surface: #ffffff;
-  --primary-color: #18181b;
-  --primary-color-hover: #27272a;
-  --primary-color-active: #3f3f46;
-  --primary-color-on: #fafafa;
-  --secondary-color: #52525b;
-  --secondary-color-hover: #3f3f46;
-  --secondary-color-active: #27272a;
-  --secondary-color-on: #fafafa;
-  --accent-color: #2563eb;
-  --accent-color-hover: #1d4ed8;
-  --accent-color-active: #1e40af;
-  --accent-color-on: #eff6ff;
-  --success-color: #16a34a;
-  --warning-color: #ca8a04;
-  --danger-color: #dc2626;
-  --info-color: #0891b2;
-  --focus-ring: 0 0 0 2px #a1a1aa;
-  --space-2: 0.5rem;
-  --space-4: 1rem;
-  --space-6: 1.5rem;
-  --radius-md: 0.375rem;
-  --font-sans: "Inter", "Geist", system-ui, sans-serif;
-}
+    Write-TextFile -Path (Join-Path $scssRoot "base\_root.scss") -Content (Get-BrandCharteTokensScss)
 
-[data-theme="dark"] {
-  --color-bg: #09090b;
-  --color-text: #fafafa;
-  --color-text-muted: #a1a1aa;
-  --color-border: #27272a;
-  --color-surface: #18181b;
-}
-'@
+    $pagesDir = Join-Path $scssRoot "pages"
+    New-Item -ItemType Directory -Path $pagesDir -Force | Out-Null
+    Write-TextFile -Path (Join-Path $pagesDir "_home.scss") -Content (Get-BrandHomePageScss)
+    Write-TextFile -Path (Join-Path $scssRoot "components\_buttons.scss") -Content (Get-BrandButtonsScss)
 
     Write-TextFile -Path (Join-Path $scssRoot "main.scss") -Content @'
 @use "base/root";
+@use "components/buttons";
+@use "pages/home";
 
 body {
   font-family: var(--font-sans);
   background: var(--color-bg);
   color: var(--color-text);
   margin: 0;
-}
-
-.page-home__title {
-  margin: 0 0 var(--space-2);
-}
-
-.page-home__lead {
-  color: var(--color-text-muted);
 }
 '@
 
@@ -840,10 +2074,139 @@ body {
     Write-TextFile -Path (Join-Path $Root "static\js\.gitkeep") -Content "`n"
 }
 
+function Install-AdminDataStudioTemplates {
+    param([Parameter(Mandatory)][string]$FeRoot)
+
+    $srcRoot = Join-Path $PSScriptRoot "templates\admin-data-studio"
+    if (-not (Test-Path -LiteralPath $srcRoot)) {
+        throw "Templates DataStudio introuvables : $srcRoot"
+    }
+    Get-ChildItem -Path $srcRoot -Recurse -File | ForEach-Object {
+        $rel = $_.FullName.Substring($srcRoot.Length + 1)
+        $dest = Join-Path $FeRoot $rel
+        $destDir = Split-Path -Parent $dest
+        if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        }
+        Write-TextFile -Path $dest -Content ([System.IO.File]::ReadAllText($_.FullName))
+    }
+}
+
+function New-AdminFrontendScaffold {
+    param(
+        [Parameter(Mandatory)][string]$FeRoot,
+        [Parameter(Mandatory)][string]$AppName
+    )
+
+    $adminApp = Join-Path $FeRoot "src\app\admin"
+    $loginApp = Join-Path $FeRoot "src\app\login"
+    $lib = Join-Path $FeRoot "src\lib"
+    $adminStyles = Join-Path $FeRoot "src\styles\admin"
+    foreach ($d in @($adminApp, $loginApp, $lib, $adminStyles)) {
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+    }
+
+    Install-AdminDataStudioTemplates -FeRoot $FeRoot
+
+    Write-TextFile -Path (Join-Path $lib "schema-types.ts") -Content @'
+export type SchemaNode = {
+  id: string;
+  label: string;
+  app_label: string;
+  model_name: string;
+};
+
+export type SchemaEdge = {
+  from: string;
+  to: string;
+  type: string;
+  field: string;
+};
+
+export type GlobalSchema = {
+  nodes: SchemaNode[];
+  edges: SchemaEdge[];
+};
+
+export type ModelField = {
+  name: string;
+  type: string;
+  nullable: boolean;
+  unique: boolean;
+  relation?: string;
+  related_model?: string;
+};
+
+export type ModelRelation = {
+  field: string;
+  type: string;
+  app_label?: string;
+  model_name?: string;
+  target_id?: string;
+  from_app_label?: string;
+  from_model_name?: string;
+  from_id?: string;
+};
+
+export type ModelSchema = {
+  app_label: string;
+  model_name: string;
+  table: string;
+  fields: ModelField[];
+  relations: ModelRelation[];
+  incoming: ModelRelation[];
+};
+'@
+
+    Write-TextFile -Path (Join-Path $adminStyles "admin.scss") -Content (Get-BrandAdminScss)
+
+    $schemaDir = Join-Path $adminApp "schema"
+    New-Item -ItemType Directory -Path $schemaDir -Force | Out-Null
+    Write-TextFile -Path (Join-Path $schemaDir "page.tsx") -Content @'
+import { redirect } from "next/navigation";
+
+export default function AdminSchemaRedirectPage() {
+  redirect("/admin?view=diagram");
+}
+'@
+
+    $modelSchemaDir = Join-Path $schemaDir "[app]"
+    New-Item -ItemType Directory -Path (Join-Path $modelSchemaDir "[model]") -Force | Out-Null
+    Write-TextFile -Path (Join-Path $modelSchemaDir "[model]\page.tsx") -Content @'
+import { redirect } from "next/navigation";
+
+type PageProps = {
+  params: Promise<{ app: string; model: string }>;
+};
+
+export default async function AdminModelSchemaRedirectPage({ params }: PageProps) {
+  const { app, model } = await params;
+  redirect(`/admin?table=${app}.${model}&view=structure`);
+}
+'@
+
+    $modelsDir = Join-Path $adminApp "models"
+    New-Item -ItemType Directory -Path (Join-Path $modelsDir "[app]\[model]") -Force | Out-Null
+    Write-TextFile -Path (Join-Path $modelsDir "[app]\[model]\page.tsx") -Content @'
+import { redirect } from "next/navigation";
+
+type PageProps = {
+  params: Promise<{ app: string; model: string }>;
+};
+
+export default async function AdminModelRedirectPage({ params }: PageProps) {
+  const { app, model } = await params;
+  redirect(`/admin?table=${app}.${model}&view=data`);
+}
+'@
+
+}
+
 function New-NextJsFrontend {
     param(
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$ProjectSlug
+        [Parameter(Mandatory)][string]$ProjectSlug,
+        [Parameter(Mandatory)][string]$AppName
     )
 
     $fe = Join-Path $Root "frontend"
@@ -864,9 +2227,14 @@ function New-NextJsFrontend {
     "lint": "next lint"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^1.1.4",
+    "@xyflow/react": "^12.6.0",
+    "lucide-react": "^0.469.0",
     "next": "^15.1.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-resizable-panels": "^2.1.7",
+    "html-to-image": "^1.11.11"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -876,15 +2244,35 @@ function New-NextJsFrontend {
     "eslint-config-next": "^15.1.0",
     "sass": "^1.83.0",
     "typescript": "^5.7.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@parcel/watcher",
+      "sharp",
+      "unrs-resolver"
+    ]
   }
 }
 "@
+
+    Write-TextFile -Path (Join-Path $fe ".npmrc") -Content @'
+# Docker / CI : pas de prompt interactif (purge node_modules)
+confirm-modules-purge=false
+# pnpm 10+ : autoriser les scripts de build requis par Next.js
+only-built-dependencies[]=@parcel/watcher
+only-built-dependencies[]=sharp
+only-built-dependencies[]=unrs-resolver
+'@
+
+    New-Item -ItemType Directory -Path (Join-Path $fe "public") -Force | Out-Null
+    Write-TextFile -Path (Join-Path $fe "public\.gitkeep") -Content "`n"
 
     Write-TextFile -Path (Join-Path $fe "next.config.ts") -Content @'
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   sassOptions: {
     includePaths: ["./src/styles"],
   },
@@ -922,22 +2310,18 @@ export default nextConfig;
 /// <reference types="next/image-types/global" />
 '@
 
-    Write-TextFile -Path (Join-Path $stylesDir "_tokens.scss") -Content @'
-:root {
-  --color-bg: #fafafa;
-  --color-text: #18181b;
-  --color-text-muted: #71717a;
-  --color-border: #e4e4e7;
-  --color-surface: #ffffff;
-  --primary-color: #18181b;
-  --primary-color-on: #fafafa;
-  --space-4: 1rem;
-  --font-sans: "Inter", "Geist", system-ui, sans-serif;
-}
-'@
+    $pagesStyleDir = Join-Path $stylesDir "pages"
+    New-Item -ItemType Directory -Path $pagesStyleDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $stylesDir "components") -Force | Out-Null
+
+    Write-TextFile -Path (Join-Path $stylesDir "_tokens.scss") -Content (Get-BrandCharteTokensScss)
+    Write-TextFile -Path (Join-Path $pagesStyleDir "_home.scss") -Content (Get-BrandHomePageScss)
+    Write-TextFile -Path (Join-Path $stylesDir "components\_buttons.scss") -Content (Get-BrandButtonsScss)
 
     Write-TextFile -Path (Join-Path $stylesDir "globals.scss") -Content @'
 @use "tokens";
+@use "components/buttons";
+@use "pages/home";
 
 * {
   box-sizing: border-box;
@@ -948,21 +2332,6 @@ body {
   font-family: var(--font-sans);
   background: var(--color-bg);
   color: var(--color-text);
-}
-
-.shell {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-  padding: var(--space-4);
-}
-
-.shell__title {
-  margin: 0 0 var(--space-4);
-}
-
-.shell__muted {
-  color: var(--color-text-muted);
 }
 '@
 
@@ -989,16 +2358,43 @@ export default function RootLayout({
 '@
 
     Write-TextFile -Path (Join-Path $appDir "page.tsx") -Content @'
+import Link from "next/link";
+
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export default function HomePage() {
   return (
-    <main className="shell">
-      <h1 className="shell__title">Next.js + Django</h1>
-      <p className="shell__muted">
-        UI produit (App Router). Metier via API :{" "}
-        <code>{apiUrl}</code>
-      </p>
+    <main className="page-home">
+      <header className="page-home__hero">
+        <p className="page-home__eyebrow">Django + uv + Next.js</p>
+        <h1 className="page-home__title">Bienvenue sur votre application</h1>
+        <p className="page-home__lead">
+          UI produit et administration custom. API metier :{" "}
+          <code>{apiUrl}</code>
+        </p>
+        <div className="page-home__actions">
+          <Link href="/admin" className="btn btn--primary">
+            Administration
+          </Link>
+          <Link href="/login" className="btn btn--secondary">
+            Connexion
+          </Link>
+        </div>
+      </header>
+      <section className="page-home__grid">
+        <article className="page-home__card">
+          <h2 className="page-home__card-title">API Django</h2>
+          <p className="page-home__card-text">
+            Service Layer, DRF et persistance via migrations ORM.
+          </p>
+        </article>
+        <article className="page-home__card">
+          <h2 className="page-home__card-title">Admin Next.js</h2>
+          <p className="page-home__card-text">
+            Registry, schema des tables et CRUD (roadmap V1-V3).
+          </p>
+        </article>
+      </section>
     </main>
   );
 }
@@ -1006,6 +2402,8 @@ export default function HomePage() {
 
     Write-TextFile -Path (Join-Path $fe ".env.example") -Content @"
 NEXT_PUBLIC_API_URL=http://localhost:8000
+# Docker dev (Server Components) — via port publie sur l'hote :
+# API_INTERNAL_URL=http://host.docker.internal:8000
 "@
 
     Write-TextFile -Path (Join-Path $fe ".gitignore") -Content @'
@@ -1015,12 +2413,29 @@ out/
 .env*.local
 '@
 
+    Write-TextFile -Path (Join-Path $fe ".dockerignore") -Content @'
+node_modules/
+.next/
+out/
+.git/
+.env*.local
+'@
+
     Write-TextFile -Path (Join-Path $fe "Dockerfile") -Content @'
+# syntax=docker/dockerfile:1
 FROM node:22-alpine AS deps
 WORKDIR /app
-RUN corepack enable && corepack prepare pnpm@latest --activate
-COPY package.json ./
-RUN pnpm install --no-frozen-lockfile
+RUN apk add --no-cache libc6-compat
+RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
+COPY package.json .npmrc ./
+COPY pnpm-lock.yaml* ./
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
+    sh -c "if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; else pnpm install; fi"
+
+FROM deps AS dev
+ENV CI=true
+EXPOSE 3000
+CMD ["pnpm", "dev"]
 
 FROM deps AS builder
 COPY . .
@@ -1030,6 +2445,7 @@ RUN pnpm build
 
 FROM node:22-alpine AS runner
 WORKDIR /app
+RUN apk add --no-cache libc6-compat
 ENV NODE_ENV=production
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
@@ -1037,15 +2453,74 @@ COPY --from=builder /app/public ./public
 EXPOSE 3000
 CMD ["node", "server.js"]
 '@
+
+    New-AdminFrontendScaffold -FeRoot $fe -AppName $AppName
 }
 
 function New-DockerStack {
     param([Parameter(Mandatory)][string]$Root)
 
+    $scriptsDir = Join-Path $Root "scripts"
+    New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+
+    Write-TextFile -Path (Join-Path $scriptsDir "docker-web-dev.sh") -Content @'
+#!/bin/sh
+set -e
+cd /app
+uv sync
+uv run python manage.py migrate --noinput
+exec uv run python manage.py runserver 0.0.0.0:8000
+'@
+
+    $feScriptsDir = Join-Path $Root "frontend\scripts"
+    New-Item -ItemType Directory -Path $feScriptsDir -Force | Out-Null
+    Write-TextFile -Path (Join-Path $feScriptsDir "docker-entrypoint-dev.sh") -Content @'
+#!/bin/sh
+# Entree Docker dev frontend : deps dans l''image + reparation non interactive si volume vide.
+set -e
+export CI=true
+cd /app
+
+pnpm_install_safe() {
+  if [ -f pnpm-lock.yaml ]; then
+    pnpm install --frozen-lockfile
+  else
+    echo "pnpm-lock.yaml absent - installation sans frozen-lockfile."
+    echo "Conseil : cd frontend && pnpm install (puis commit pnpm-lock.yaml)."
+    pnpm install
+  fi
+}
+
+if [ ! -f node_modules/.modules.yaml ] || [ package.json -nt node_modules/.modules.yaml ]; then
+  echo "Synchronisation node_modules..."
+  pnpm_install_safe
+elif [ ! -e node_modules/lucide-react ] && [ ! -e node_modules/.pnpm ]; then
+  echo "node_modules incomplet - reinstallation pnpm..."
+  pnpm_install_safe
+fi
+
+mkdir -p .next/cache .next/server .next/static
+exec pnpm dev
+'@
+
+    Write-TextFile -Path (Join-Path $feScriptsDir "docker-frontend-dev.sh") -Content @'
+#!/bin/sh
+# Alias - preferer scripts/docker-entrypoint-dev.sh
+exec /app/scripts/docker-entrypoint-dev.sh
+'@
+
     Write-TextFile -Path (Join-Path $Root "Dockerfile") -Content @'
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS base
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+
+FROM base AS dev
+COPY pyproject.toml uv.lock ./
+RUN uv sync
+EXPOSE 8000
+CMD ["uv", "run", "python", "manage.py", "runserver", "0.0.0.0:8000"]
+
+FROM base AS prod
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY . .
@@ -1065,7 +2540,7 @@ frontend/.next/
 .env
 '@
 
-    Write-TextFile -Path (Join-Path $Root "docker-compose.dev.yml") -Content @'
+    $composeDev = @'
 services:
   db:
     image: postgres:16-alpine
@@ -1074,7 +2549,7 @@ services:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: dev
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -1087,9 +2562,46 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: uv run python manage.py runserver 0.0.0.0:8000
+      target: dev
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        cd /app
+        echo "Attente DNS + PostgreSQL (service db)..."
+        attempt=0
+        max=60
+        while [ "$attempt" -lt "$max" ]; do
+          if getent hosts db >/dev/null 2>&1; then
+            break
+          fi
+          attempt=$((attempt + 1))
+          sleep 2
+        done
+        if [ "$attempt" -ge "$max" ]; then
+          echo "ERREUR: impossible de resoudre l'hote db sur le reseau Docker." >&2
+          exit 1
+        fi
+        sleep 2
+        uv sync
+        attempt=0
+        while [ "$attempt" -lt "$max" ]; do
+          if uv run python -c "import socket; s=socket.create_connection(('db',5432),3); s.close()"; then
+            break
+          fi
+          attempt=$((attempt + 1))
+          sleep 2
+        done
+        if [ "$attempt" -ge "$max" ]; then
+          echo "ERREUR: PostgreSQL (db:5432) injoignable apres attente." >&2
+          exit 1
+        fi
+        uv run python manage.py migrate --noinput
+        exec uv run python manage.py runserver 0.0.0.0:8000
     volumes:
       - .:/app
+      - backend_venv:/app/.venv
     environment:
       DJANGO_ENV: dev
       DJANGO_SETTINGS_MODULE: config.settings
@@ -1107,29 +2619,57 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "uv run python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/', timeout=3)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      target: deps
-    command: pnpm dev
+      target: dev
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["/bin/sh", "scripts/docker-entrypoint-dev.sh"]
     volumes:
       - ./frontend:/app
-      - frontend_node_modules:/app/node_modules
+      - /app/node_modules
+      - frontend_next:/app/.next
     environment:
+      CI: "true"
       NEXT_PUBLIC_API_URL: http://localhost:8000
+      API_INTERNAL_URL: http://host.docker.internal:8000
+      HOSTNAME: "0.0.0.0"
     ports:
       - "3000:3000"
     depends_on:
-      - web
+      web:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:
-  frontend_node_modules:
+  backend_venv:
+  frontend_next:
 '@
 
-    Write-TextFile -Path (Join-Path $Root "docker-compose.yml") -Content @'
+    Write-TextFile -Path (Join-Path $Root ".gitattributes") -Content @'
+# Scripts shell : LF obligatoire pour Docker/Linux
+*.sh text eol=lf
+'@
+
+    Write-TextFile -Path (Join-Path $Root "docker-compose.yml") -Content $composeDev
+    Write-TextFile -Path (Join-Path $Root "docker-compose.dev.yml") -Content $composeDev
+
+    Write-TextFile -Path (Join-Path $Root "docker-compose.prod.yml") -Content @'
 services:
   db:
     image: postgres:16-alpine
@@ -1141,11 +2681,15 @@ services:
       - pgdata:/var/lib/postgresql/data
 
   web:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod
     environment:
       DJANGO_ENV: prod
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?required}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?required}
+      DJANGO_USE_POSTGRES: "1"
       DJANGO_DB_ENGINE: django.db.backends.postgresql
       DJANGO_DB_NAME: ${POSTGRES_DB:-app}
       DJANGO_DB_USER: ${POSTGRES_USER:-app}
@@ -1160,6 +2704,8 @@ services:
   frontend:
     build:
       context: ./frontend
+      dockerfile: Dockerfile
+      target: runner
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
@@ -1188,6 +2734,26 @@ def api_client():
   """Client DRF pour tests API."""
   from rest_framework.test import APIClient
   return APIClient()
+
+
+@pytest.fixture
+def superuser(db):
+  """Superuser Django pour tests admin."""
+  from django.contrib.auth import get_user_model
+
+  User = get_user_model()
+  return User.objects.create_superuser(
+      username="admin",
+      email="admin@test.local",
+      password="admin-secret",
+  )
+
+
+@pytest.fixture
+def api_client_superuser(api_client, superuser):
+  """Client DRF authentifie en superuser."""
+  api_client.force_authenticate(user=superuser)
+  return api_client
 '@
 
     Write-TextFile -Path (Join-Path $Root "pytest.ini") -Content @'
@@ -1195,6 +2761,67 @@ def api_client():
 DJANGO_SETTINGS_MODULE = config.settings
 python_files = tests.py test_*.py *_tests.py
 addopts = -ra
+'@
+
+    Write-TextFile -Path (Join-Path $testsDir "test_admin_api.py") -Content @'
+"""Tests API admin panel (auth superuser)."""
+
+import pytest
+from django.contrib.auth import get_user_model
+
+
+@pytest.mark.django_db
+def test_registry_anonymous_forbidden(api_client) -> None:
+    response = api_client.get("/api/admin/registry/")
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_registry_non_superuser_forbidden(api_client, db) -> None:
+    User = get_user_model()
+    user = User.objects.create_user(username="user", password="pass")
+    api_client.force_authenticate(user=user)
+    response = api_client.get("/api/admin/registry/")
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_registry_superuser_ok(api_client_superuser) -> None:
+    response = api_client_superuser.get("/api/admin/registry/")
+    assert response.status_code == 200
+    assert "results" in response.json()
+
+
+@pytest.mark.django_db
+def test_schema_global_superuser_ok(api_client_superuser) -> None:
+    response = api_client_superuser.get("/api/admin/schema/")
+    assert response.status_code == 200
+    assert "nodes" in response.json()
+
+
+@pytest.mark.django_db
+def test_login_rejects_non_superuser(api_client, db) -> None:
+    User = get_user_model()
+    User.objects.create_user(username="user", password="pass")
+    response = api_client.post(
+        "/api/auth/login/",
+        {"username": "user", "password": "pass"},
+        format="json",
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_login_accepts_superuser(api_client, superuser) -> None:
+    response = api_client.post(
+        "/api/auth/login/",
+        {"username": "admin", "password": "admin-secret"},
+        format="json",
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "access" in data
+    assert data["user"]["is_superuser"] is True
 '@
 }
 
@@ -1218,21 +2845,23 @@ function New-CursorProjectRules {
 |--------|------|
 | ``config/`` | Settings Django (dev/qua/prod), urls, wsgi/asgi |
 | ``apps/`` | Apps metier (Service Layer strict) |
-| ``templates/`` | Templates globaux (admin / HTMX) |
-| ``static/scss/`` | SCSS 7-1 Flat High-End (Django admin) |
-| ``frontend/`` | Next.js App Router (UI produit) |
+| ``templates/`` | Templates Django legacy minimaux |
+| ``static/scss/`` | SCSS 7-1 (pages internes optionnelles) |
+| ``frontend/`` | Next.js App Router + admin custom ``/admin`` |
+| ``apps/admin_panel/`` | Registry whitelist + API DRF ``/api/admin/`` |
 | ``tests/`` | Pytest |
 | ``docker-compose*.yml`` | Stack locale / prod |
 
 ## Apps Django
 | App | Role |
 |-----|------|
-| ``apps.$AppName`` | App initiale : models, services, selectors, serializers, CBV |
+| ``apps.$AppName`` | App metier (ex. Transaction) |
+| ``apps.admin_panel`` | Admin custom : registry, schema, stubs CRUD API |
 
 ## Front Next.js
-- Pas de logique metier : fetch vers API Django/DRF uniquement.
-- SCSS + tokens ``:root`` (pas de Tailwind).
-- ``NEXT_PUBLIC_API_URL`` pour l'URL API.
+- UI admin principale : ``/admin``, ``/login`` (Flat High-End, SCSS + ``:root``).
+- Pas de HTMX. Pas de logique metier cote client.
+- ``NEXT_PUBLIC_API_URL`` (navigateur) ; ``API_INTERNAL_URL`` (RSC Docker, ex. ``http://host.docker.internal:8000``).
 "@
     Write-TextFile -Path (Join-Path $cursorDir "app-structure.md") -Content $structure
 
@@ -1248,15 +2877,16 @@ package "config" {
 package "apps" {
   package "$AppName" {
     [models]
-    [services]
-    [selectors]
-    [serializers]
-    [views CBV]
+    [Transaction]
+  }
+  package "admin_panel" {
+    [registry]
+    [API /api/admin/]
   }
 }
 package "frontend" {
-  [Next.js App Router]
-  [fetch API DRF]
+  [App Router]
+  [admin UI]
 }
 database "PostgreSQL" as db
 [apps] --> db : ORM
@@ -1275,7 +2905,7 @@ database "PostgreSQL" as db
 | Sujet | Agent |
 |-------|--------|
 | Service Layer, CBV, DRF, MRO | @Architect (django-architect) |
-| SCSS, tokens, BEM, HTMX admin | @UI-Engineer |
+| SCSS, tokens, BEM, admin Next | @UI-Engineer |
 | Next.js App Router, RSC | nextjs-specialist |
 | Docker, compose, CI | devops-engineer |
 | CSRF, permissions, prod | security-auditor |
@@ -1296,19 +2926,18 @@ Skills globales : ``~/.cursor/skills/<nom>/SKILL.md``
 - Pas de logique metier dans models, signals, templates, forms
 - DRF pour API consommee par Next.js
 
-## UI Django (admin / HTMX)
-- SCSS 7-1, tokens ``:root``, BEM, mobile-first, flexbox
-- HTMX pour interactions sans full reload
-- **Tailwind interdit**
+## UI Django (legacy templates)
+- Templates minimaux uniquement ; **pas de HTMX**
+- Admin principal = Next.js ``frontend/src/app/admin/``
 
 ## UI Next.js (frontend/)
-- App Router, Server Components par defaut
-- Pas de logique metier cote client
-- SCSS + variables CSS (alignees Django)
-- ``NEXT_PUBLIC_API_URL`` uniquement pour URL publique API
+- Admin custom Flat High-End : ``/admin``, ``/login``
+- SCSS + tokens ``:root`` (``src/styles/admin/``)
+- CRUD/schema via API ``/api/admin/`` (stubs V1, V2 CRUD reel)
+- **Tailwind interdit**
 
 ## Docker
-- ``docker compose -f docker-compose.dev.yml up --build``
+- ``docker compose up --build`` (Django runserver + Next ``pnpm dev``)
 - Backend : image ``uv`` ; Frontend : Node 22 + standalone Next
 
 ## Definition of Done (rappel)
@@ -1330,8 +2959,9 @@ alwaysApply: true
 ## Architecture
 - Django racine : ``config/settings/`` (base, dev, qua, prod)
 - ``apps/`` : Service Layer strict
-- ``frontend/`` : Next.js UI produit (pas HTMX)
-- API : prefixe ``/api/`` + DRF serializers
+- ``frontend/`` : UI produit + admin Next.js
+- API admin : ``/api/admin/`` (``apps.admin_panel``)
+- ``django-admin/`` : fallback dev si ``DJANGO_ADMIN_ENABLED=true``
 
 ## Interdits
 - pip/poetry/pipenv (uv uniquement)
@@ -1388,26 +3018,88 @@ pnpm dev
 
     $dk = if ($HasDocker) { @"
 
-## Docker
+## Docker (dev — runserver + Next dev)
 ``````bash
-docker compose -f docker-compose.dev.yml up --build
+docker compose up --build
 ``````
+
+Production : ``docker compose -f docker-compose.prod.yml up --build``
 "@ } else { "" }
 
     $readme = @"
-# Projet monorepo Django + uv$(if ($HasFrontend) { " + Next.js" })$(if ($HasDocker) { " + Docker" })
+# Monorepo Django + uv + Next.js$(if ($HasDocker) { " + Docker" })
 
-## Backend
-``````bash
+## Demarrage rapide
+
+``````powershell
+# Generer un projet (script)
+powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1 -NewFolder mon_projet -NoInteractive
+
+cd mon_projet
 uv sync
 uv run python manage.py migrate
-uv run python manage.py runserver
 ``````
 
-App metier initiale : ``apps.$AppName``
-$fe$dk
+## Docker (dev)
+
+``````powershell
+$env:DOCKER_BUILDKIT = "1"
+docker compose up --build
+``````
+
+Les paquets frontend sont installes au **build** de l'image (``pnpm install --frozen-lockfile`` si ``pnpm-lock.yaml`` present — genere a l'init).
+Le conteneur demarre directement sur ``pnpm dev`` (pas de reinstall au ``up``).
+Le volume anonyme ``/app/node_modules`` conserve les deps de l'image (demarrage rapide).
+Apres modification de ``package.json`` : ``docker compose build frontend --no-cache``.
+
+Depannage :
+- ``web`` en ``Restarting`` : ``docker compose logs web`` (souvent PostgreSQL : ``failed to resolve host 'db'``).
+- Port 5432 deja utilise sous Windows : Postgres Docker mappe sur **5433** (hote) ; arreter un Postgres local ou changer le mapping.
+- ``fetch failed`` / ``ECONNREFUSED`` sur ``/admin`` : ``curl http://localhost:8000/api/health/`` ; sous Docker Desktop utiliser ``API_INTERNAL_URL=http://host.docker.internal:8000`` + ``extra_hosts: host-gateway``.
+- ``app-paths-manifest.json`` ENOENT : supprimer ``frontend/.next`` sur l'hote, volume ``frontend_next`` dans compose, puis ``docker compose up --build``.
+- ``ERR_PNPM_NO_LOCKFILE`` : ``cd frontend && pnpm install`` (cree ``pnpm-lock.yaml``), puis ``docker compose build frontend``.
+- ``Cannot resolve lucide-react`` / prompt pnpm purge : ``docker compose down -v`` puis ``docker compose build frontend`` et ``docker compose up`` (volume ``node_modules`` vide ou Windows desync).
+- ``dependency web failed to start`` : ``docker compose logs web`` (PostgreSQL, migrations, healthcheck).
+
+- Backend : http://localhost:8000
+- Frontend : http://localhost:3000
+- Admin Next.js : http://localhost:3000/admin
+- Login : http://localhost:3000/login (superuser Django uniquement)
+
+## Compte superuser (obligatoire pour /admin)
+
+Propose a la fin du script d'init (etape **Superuser Django**), ou manuellement :
+
+``````bash
+uv run python manage.py createsuperuser
+``````
+
+Puis connexion sur ``/login``. L'API ``/api/admin/*`` exige un JWT Bearer (superuser).
+
+## Backend
+
+App metier : ``apps.$AppName`` (ex. ``Transaction``)
+Admin API : ``apps.admin_panel`` — registry whitelist, schema, stubs CRUD
+
+Django ``/django-admin/`` : fallback **dev uniquement** (``DJANGO_ADMIN_ENABLED``).
+Desactive en prod dans ``config/settings/prod.py``.
+
+**Structure BDD** : ``models.py`` + migrations uniquement (pas de DDL via UI admin).
+
+$fe
+
+## Roadmap parite admin Django
+
+| Phase | Perimetre |
+|-------|-----------|
+| **V1 (scaffold)** | Registry, schema table/global, export Mermaid, pages Next stub, API stubs |
+| **V2** | CRUD reel (list/create/edit/delete), auth, permissions, export SVG |
+| **V3** | Inlines, filtres avances, actions bulk, audit, parite fonctionnelle partielle |
+
+> Ce scaffold ne pretend pas a une parite 100 % avec ``django.contrib.admin``.
 
 ## Cursor
+
 Voir ``.cursor/AGENTS.md`` et ``.cursor/skills/STACK.md``.
 "@
     Write-TextFile -Path (Join-Path $Root "README.md") -Content $readme
@@ -1429,18 +3121,42 @@ function Test-ProjectStructure {
         "apps\$AppName\services.py",
         "apps\$AppName\selectors.py",
         "apps\$AppName\serializers.py",
+        "apps\admin_panel\registry.py",
+        "apps\admin_panel\urls.py",
+        "apps\admin_panel\views.py",
         ".cursor\AGENTS.md",
         ".cursor\rules\00-project-stack.mdc"
     )
     if ($ExpectFrontend) {
+        $lockFile = Join-Path $Root "frontend\pnpm-lock.yaml"
+        if ($ExpectDocker -and -not (Test-Path -LiteralPath $lockFile)) {
+            Write-Host "     Avertissement : frontend/pnpm-lock.yaml absent (Docker : cd frontend && pnpm install)." -ForegroundColor DarkYellow
+        }
         $required += @(
             "frontend\package.json",
             "frontend\src\app\page.tsx",
+            "frontend\src\app\admin\page.tsx",
+            "frontend\src\app\login\page.tsx",
+            "frontend\src\lib\admin-api.ts",
+            "frontend\src\lib\schema-types.ts",
+            "frontend\src\lib\admin-studio-types.ts",
+            "frontend\src\lib\admin-studio-adapter.ts",
+            "frontend\src\components\admin\DatabaseAdmin.tsx",
+            "frontend\src\components\admin\AdminERDiagram.tsx",
+            "frontend\src\components\admin\AdminDataTable.tsx",
+            "frontend\src\components\admin\RowFormDialog.tsx",
+            "frontend\src\styles\admin\data-studio.scss",
             "frontend\next.config.ts"
         )
     }
     if ($ExpectDocker) {
-        $required += @("Dockerfile", "docker-compose.dev.yml")
+        $required += @(
+            "Dockerfile",
+            "docker-compose.yml",
+            "scripts\docker-web-dev.sh",
+            "frontend\scripts\docker-entrypoint-dev.sh",
+            "frontend\scripts\docker-frontend-dev.sh"
+        )
     }
     foreach ($rel in $required) {
         $full = Join-Path $Root $rel
@@ -1452,11 +3168,26 @@ function Test-ProjectStructure {
 
 function Install-FrontendDependencies {
     param([Parameter(Mandatory)][string]$FrontendRoot)
+
+    $lockPath = Join-Path $FrontendRoot "pnpm-lock.yaml"
+    $installArgs = if (Test-Path -LiteralPath $lockPath) {
+        @("install", "--frozen-lockfile")
+    } else {
+        @("install")
+    }
+
     foreach ($tool in @("pnpm", "npm")) {
         if (-not (Resolve-ExecutablePath -Name $tool)) { continue }
         try {
-            Invoke-CheckedCommand -Exe $tool -Arguments @("install") -WorkingDirectory $FrontendRoot `
+            if ($tool -eq "npm") {
+                $installArgs = @("install")
+            }
+            Write-Host "     $tool $($installArgs -join ' ') (genere pnpm-lock.yaml pour Docker rapide)..." -ForegroundColor DarkGray
+            Invoke-CheckedCommand -Exe $tool -Arguments $installArgs -WorkingDirectory $FrontendRoot `
                 -Quiet -TimeoutSeconds $CommandTimeoutSeconds
+            if ($tool -eq "pnpm" -and -not (Test-Path -LiteralPath $lockPath)) {
+                Write-Host "     Avertissement : pnpm-lock.yaml absent apres install." -ForegroundColor DarkYellow
+            }
             return $tool
         } catch {
             Write-Host "     $tool install ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
@@ -1564,7 +3295,8 @@ try {
         Invoke-UvCommand -Arguments @("init", "--name", $uvName) -WorkingDirectory $root -Quiet
     }
     Invoke-UvCommand -Arguments @(
-        "add", "django", "djangorestframework", "whitenoise", "django-cors-headers", "gunicorn"
+        "add", "django", "djangorestframework", "djangorestframework-simplejwt",
+        "whitenoise", "django-cors-headers", "gunicorn", "psycopg[binary]"
     ) -WorkingDirectory $root -Quiet
     Invoke-UvCommand -Arguments @(
         "add", "--dev", "ruff", "pytest", "pytest-django", "mypy", "django-stubs"
@@ -1592,9 +3324,23 @@ try {
         Write-TextFile -Path $appsPyPath -Content $appsPy
     }
     New-AppServiceLayer -Root $root -AppName $AppName
+    New-CoreModels -Root $root -AppName $AppName
     Complete-PipelineStep
 
-    Start-PipelineStep -Title "Templates et assets SCSS" -Detail "7-1 Flat High-End + base.html HTMX-ready"
+    Start-PipelineStep -Title "Admin panel API" -Detail "apps/admin_panel + registry + schema DRF"
+    Invoke-UvCommand -Arguments @(
+        "run", "django-admin", "startapp", "admin_panel", "apps\admin_panel"
+    ) -WorkingDirectory $root -Quiet
+    $panelAppsPy = Join-Path $root "apps\admin_panel\apps.py"
+    if (Test-Path -LiteralPath $panelAppsPy) {
+        $panelApps = Get-Content -LiteralPath $panelAppsPy -Raw -Encoding UTF8
+        $panelApps = $panelApps -replace "name = ['\`"]admin_panel['\`"]", "name = `"apps.admin_panel`""
+        Write-TextFile -Path $panelAppsPy -Content $panelApps
+    }
+    New-AdminPanelBackend -Root $root -AppName $AppName
+    Complete-PipelineStep
+
+    Start-PipelineStep -Title "Templates et assets SCSS" -Detail "7-1 minimal (sans HTMX)"
     New-Item -ItemType Directory -Path (Join-Path $root "templates") -Force | Out-Null
     Write-TextFile -Path (Join-Path $root "templates\base.html") -Content @'
 <!DOCTYPE html>
@@ -1607,10 +3353,12 @@ try {
   {% block extra_head %}{% endblock %}
 </head>
 <body>
+  <header class="site-header">
+    <span class="site-header__brand">Mon application</span>
+  </header>
   <main class="layout-main">
     {% block content %}{% endblock %}
   </main>
-  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
   {% block extra_body %}{% endblock %}
 </body>
 </html>
@@ -1623,14 +3371,14 @@ try {
 
     if ($doFrontend) {
         Start-PipelineStep -Title "Frontend Next.js" -Detail "App Router + SCSS tokens (sans Tailwind)"
-        New-NextJsFrontend -Root $root -ProjectSlug $uvName
+        New-NextJsFrontend -Root $root -ProjectSlug $uvName -AppName $AppName
         $pkgMgr = $null
-        if ($InstallFrontendDeps.IsPresent) {
+        if (-not $SkipFrontendDeps.IsPresent) {
             $pkgMgr = Install-FrontendDependencies -FrontendRoot (Join-Path $root "frontend")
         } else {
-            Write-Host '     Fichiers generes - cd frontend; pnpm install' -ForegroundColor DarkGray
+            Write-Host "     (-SkipFrontendDeps) : pas de lockfile - le build Docker frontend sera plus lent." -ForegroundColor DarkYellow
         }
-        Complete-PipelineStep -Message $(if ($pkgMgr) { "deps $pkgMgr" } else { "squelette Next.js" })
+        Complete-PipelineStep -Message $(if ($pkgMgr) { "deps $pkgMgr + lockfile" } else { "squelette Next.js" })
     } else {
         Write-Host "     (SkipFrontend)" -ForegroundColor DarkYellow
     }
@@ -1659,6 +3407,11 @@ DJANGO_ENV=dev
 DJANGO_SECRET_KEY=change-me
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 
+# Superuser non interactif (CI / -NoInteractive) :
+# DJANGO_SUPERUSER_USERNAME=admin
+# DJANGO_SUPERUSER_EMAIL=admin@local.test
+# DJANGO_SUPERUSER_PASSWORD=change-me
+
 # PostgreSQL (Docker / qua / prod)
 # POSTGRES_DB=app
 # POSTGRES_USER=app
@@ -1684,9 +3437,26 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
         Write-Host "     Avertissement: -SkipMigrate detecte, migration ignoree." -ForegroundColor DarkYellow
         Complete-PipelineStep -Message "skipped"
     } else {
-        Write-Host "     Migration SQLite locale (sans Postgres global)" -ForegroundColor DarkGray
+        Write-Host "     makemigrations + migrate (SQLite locale)" -ForegroundColor DarkGray
+        Invoke-NativeCli -Exe (Join-Path $root ".venv\Scripts\python.exe") -Arguments @(
+            "manage.py", "makemigrations", $AppName, "--noinput"
+        ) -WorkingDirectory $root -Quiet
         Invoke-DjangoMigrate -Root $root -TimeoutSeconds $MigrateTimeoutSeconds
         Complete-PipelineStep -Message "migrations appliquees"
+    }
+
+    if (-not $SkipCreatesuperuser.IsPresent) {
+        Start-PipelineStep -Title "Superuser Django" -Detail "createsuperuser pour /admin"
+        try {
+            Invoke-DjangoCreatesuperuser -Root $root -NoInteractive:$NoInteractive.IsPresent
+            Complete-PipelineStep -Message "compte admin"
+        } catch {
+            Write-Host "     createsuperuser echoue : $($_.Exception.Message)" -ForegroundColor DarkYellow
+            Write-Host "     Relancez : uv run python manage.py createsuperuser" -ForegroundColor DarkYellow
+            Complete-PipelineStep -Message "a completer manuellement"
+        }
+    } else {
+        Write-Host "     (-SkipCreatesuperuser)" -ForegroundColor DarkYellow
     }
 
     Write-PipelineSummary -Root $root -AppName $AppName -HasFrontend $doFrontend -HasDocker $doDocker
