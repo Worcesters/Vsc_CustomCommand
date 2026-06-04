@@ -1,11 +1,11 @@
 import { redirect } from "next/navigation";
 import { Suspense } from "react";
-import { getServerAccessToken } from "@/lib/auth-cookies";
+import { getServerAccessToken } from "@/lib/auth-cookies.server";
 import {
   fetchGlobalSchema,
   fetchModelSchema,
   fetchRegistry,
-} from "@/lib/admin-api";
+} from "@/lib/admin-api-server";
 import { DatabaseAdmin } from "@/components/admin/DatabaseAdmin";
 import type { GlobalSchema, ModelSchema } from "@/lib/schema-types";
 

@@ -18,7 +18,7 @@ import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
 import { toSvg } from "html-to-image";
 import { Download, FileCode, Key, LinkIcon } from "lucide-react";
-import { downloadSchemaMermaid } from "@/lib/admin-api";
+import { downloadSchemaMermaid } from "@/lib/admin-api-client";
 import type { GlobalSchema } from "@/lib/schema-types";
 import type { StudioTable } from "@/lib/admin-studio-types";
 

@@ -25,8 +25,19 @@ export default function LoginPage() {
     setLoading(false);
 
     if (!res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { detail?: string };
-      setError(data.detail ?? "Identifiants invalides ou acces refuse.");
+      const data = (await res.json().catch(() => ({}))) as {
+        detail?: string;
+        code?: string;
+      };
+      let message = data.detail ?? "Identifiants invalides ou acces refuse.";
+      if (data.code === "not_superuser") {
+        message +=
+          " Creez un superuser dans la base Docker : docker compose exec web uv run python manage.py createsuperuser";
+      } else if (data.code === "invalid_credentials") {
+        message +=
+          " (Docker ? le compte doit exister dans PostgreSQL du compose, pas seulement en SQLite locale.)";
+      }
+      setError(message);
       return;
     }
 

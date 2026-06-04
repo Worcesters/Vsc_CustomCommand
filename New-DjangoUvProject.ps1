@@ -85,11 +85,364 @@ param(
 $script:PreviousErrorActionPreference = $ErrorActionPreference
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
+    $script:PreviousNativeCommandErrorPreference = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 $script:ScaffoldFailed = $false
+$script:PreviousNativeCommandErrorPreference = $null
 $script:DbEnvKeys = @(
     "DJANGO_DB_HOST", "DJANGO_DB_ENGINE", "DJANGO_DB_NAME",
     "DJANGO_DB_USER", "DJANGO_DB_PASSWORD", "DJANGO_DB_PORT", "DJANGO_USE_POSTGRES"
 )
+
+function Test-LocalTcpPortAvailable {
+    param([Parameter(Mandatory)][int]$Port)
+
+    $client = $null
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $async = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
+        $completed = $async.AsyncWaitHandle.WaitOne(300)
+        if ($completed -and $client.Connected) {
+            $client.EndConnect($async)
+            return $false
+        }
+        return $true
+    } catch {
+        return $true
+    } finally {
+        if ($null -ne $client) {
+            $client.Close()
+            $client.Dispose()
+        }
+    }
+}
+
+function Find-AvailablePostgresHostPort {
+    param(
+        [int]$StartPort = 5433,
+        [int]$EndPort = 5442
+    )
+
+    for ($port = $StartPort; $port -le $EndPort; $port++) {
+        if (Test-LocalTcpPortAvailable -Port $port) {
+            return $port
+        }
+    }
+    throw "Aucun port hote libre entre $StartPort et $EndPort pour PostgreSQL Docker."
+}
+
+function Get-ProjectPostgresHostPort {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $envFile = Join-Path $Root ".env"
+    if (Test-Path -LiteralPath $envFile) {
+        $match = Select-String -LiteralPath $envFile -Pattern '^\s*DJANGO_DB_PORT\s*=\s*(\d+)\s*$' -AllMatches
+        if ($match -and $match.Matches.Count -gt 0) {
+            return [int]$match.Matches[0].Groups[1].Value
+        }
+    }
+    $composeFile = Join-Path $Root "docker-compose.yml"
+    if (Test-Path -LiteralPath $composeFile) {
+        $match = Select-String -LiteralPath $composeFile -Pattern '"(\d+):5432"' -AllMatches
+        if ($match -and $match.Matches.Count -gt 0) {
+            return [int]$match.Matches[0].Groups[1].Value
+        }
+    }
+    return 5433
+}
+
+function Set-ProjectPostgresHostPort {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][int]$Port
+    )
+
+    $envFile = Join-Path $Root ".env"
+    if (Test-Path -LiteralPath $envFile) {
+        $envLines = Get-Content -LiteralPath $envFile -Encoding UTF8
+        $updated = $false
+        $envLines = $envLines | ForEach-Object {
+            if ($_ -match '^\s*DJANGO_DB_PORT\s*=') {
+                $updated = $true
+                "DJANGO_DB_PORT=$Port"
+            } else {
+                $_
+            }
+        }
+        if (-not $updated) {
+            $envLines += "DJANGO_DB_PORT=$Port"
+        }
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($envFile, ($envLines -join "`n") + "`n", $utf8NoBom)
+    }
+
+    foreach ($composeName in @("docker-compose.yml", "docker-compose.dev.yml")) {
+        $composePath = Join-Path $Root $composeName
+        if (-not (Test-Path -LiteralPath $composePath)) {
+            continue
+        }
+        $composeText = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
+        $composeText = $composeText -replace '"\d+:5432"', "`"${Port}:5432`""
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($composePath, $composeText, $utf8NoBom)
+    }
+}
+
+function Get-DockerCliOutputText {
+    param($Output)
+
+    if ($null -eq $Output) {
+        return ""
+    }
+    return (($Output | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $_.ToString()
+            } else {
+                "$_"
+            }
+        }) -join "`n").Trim()
+}
+
+function Test-ComposeDatabaseAcceptsConnections {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    Push-Location -LiteralPath $Root
+    try {
+        & docker compose exec -T db pg_isready -U app -d app 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+        $env:PGPASSWORD = "dev"
+        & docker compose exec -T -e PGPASSWORD=dev db psql -U app -d app -c "SELECT 1" 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+function Invoke-DockerCompose {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string[]]$ComposeArguments
+    )
+
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    Push-Location -LiteralPath $Root
+    try {
+        $output = & docker @ComposeArguments 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            return
+        }
+        $argsText = $ComposeArguments -join " "
+        $detail = Get-DockerCliOutputText -Output $output
+        $isDbUp = $argsText -match "compose\s+up\b" -and $argsText -match "\bdb\b"
+        if ($isDbUp -and (Test-ComposeDatabaseAcceptsConnections -Root $Root)) {
+            Write-Host "     docker compose up : service db deja operationnel" -ForegroundColor DarkGray
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($detail)) {
+            throw "docker $argsText a echoue (code $exitCode)"
+        }
+        throw "docker $argsText a echoue (code $exitCode): $detail"
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+function Ensure-ComposeDatabaseForDjango {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [int]$TimeoutSeconds = 60
+    )
+
+    if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+        $hostPort = Get-ProjectPostgresHostPort -Root $Root
+        Write-Host "     PostgreSQL deja operationnel (localhost:$hostPort)" -ForegroundColor DarkGray
+        return
+    }
+    Start-ComposeDatabaseService -Root $Root -TimeoutSeconds $TimeoutSeconds
+}
+
+function Import-ProjectDotEnv {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $envFile = Join-Path $Root ".env"
+    if (-not (Test-Path -LiteralPath $envFile)) {
+        return
+    }
+    Get-Content -LiteralPath $envFile -Encoding UTF8 | ForEach-Object {
+        $line = $_.Trim()
+        if ($line.Length -eq 0 -or $line.StartsWith("#")) {
+            return
+        }
+        $eq = $line.IndexOf("=")
+        if ($eq -lt 1) {
+            return
+        }
+        $key = $line.Substring(0, $eq).Trim()
+        $value = $line.Substring($eq + 1).Trim().Trim('"').Trim("'")
+        if ($key.Length -gt 0) {
+            Set-Item -Path "Env:$key" -Value $value
+        }
+    }
+}
+
+function Write-ProjectDotEnvForDocker {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [int]$PostgresHostPort = 5433
+    )
+
+    $content = @"
+# Genere par New-DjangoUvProject.ps1 - PostgreSQL = base Django unique (hote + Docker)
+
+DJANGO_SETTINGS_MODULE=config.settings
+DJANGO_ENV=dev
+DJANGO_SECRET_KEY=dev-local-change-me
+DJANGO_USE_POSTGRES=1
+DJANGO_DB_ENGINE=django.db.backends.postgresql
+DJANGO_DB_NAME=app
+DJANGO_DB_USER=app
+DJANGO_DB_PASSWORD=dev
+DJANGO_DB_HOST=localhost
+DJANGO_DB_PORT=$PostgresHostPort
+CORS_ALLOWED_ORIGINS=http://localhost:3000
+
+# DJANGO_SUPERUSER_USERNAME=admin
+# DJANGO_SUPERUSER_EMAIL=admin@local.test
+# DJANGO_SUPERUSER_PASSWORD=change-me
+"@
+    Write-TextFile -Path (Join-Path $Root ".env") -Content $content
+}
+
+function Start-ComposeDatabaseService {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [int]$TimeoutSeconds = 90
+    )
+
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        throw "Docker introuvable - impossible de demarrer PostgreSQL (service db)."
+    }
+
+    if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+        $readyPort = Get-ProjectPostgresHostPort -Root $Root
+        Write-Host "     PostgreSQL deja pret (localhost:$readyPort)" -ForegroundColor DarkGray
+        return
+    }
+
+    $hostPort = Get-ProjectPostgresHostPort -Root $Root
+    $portRetries = 0
+    $maxPortRetries = 10
+
+    while ($true) {
+        Push-Location $Root
+        try {
+            Write-Host "     docker compose up -d db (port hote $hostPort)" -ForegroundColor DarkGray
+            Invoke-DockerCompose -Root $Root -ComposeArguments @("compose", "up", "-d", "db")
+            break
+        } catch {
+            $msg = $_.Exception.Message
+            if ($msg -match 'port is already allocated|already allocated|Bind for') {
+                $portRetries++
+                if ($portRetries -gt $maxPortRetries) {
+                    throw @"
+Impossible de demarrer PostgreSQL Docker : ports $hostPort+ occupes.
+Arretez l'autre conteneur (docker ps) ou changez le mapping dans docker-compose.yml et DJANGO_DB_PORT dans .env.
+"@
+                }
+                $hostPort = Find-AvailablePostgresHostPort -StartPort ($hostPort + 1)
+                Set-ProjectPostgresHostPort -Root $Root -Port $hostPort
+                Write-Host "     Port occupe - bascule sur localhost:$hostPort (.env + compose mis a jour)" -ForegroundColor DarkYellow
+                continue
+            }
+            throw
+        } finally {
+            Pop-Location
+        }
+    }
+
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    Push-Location -LiteralPath $Root
+    try {
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+                break
+            }
+            Start-Sleep -Seconds 2
+        }
+        if (-not (Test-ComposeDatabaseAcceptsConnections -Root $Root)) {
+            throw "PostgreSQL (service db) non pret apres ${TimeoutSeconds}s"
+        }
+        Write-Host "     PostgreSQL pret (localhost:$hostPort, user app / password dev)" -ForegroundColor DarkGray
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+function Test-ProjectDotEnvUsesPostgres {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $envFile = Join-Path $Root ".env"
+    if (-not (Test-Path -LiteralPath $envFile)) {
+        return $false
+    }
+    $raw = Get-Content -LiteralPath $envFile -Raw -Encoding UTF8
+    return $raw -match '(?m)DJANGO_USE_POSTGRES\s*=\s*(1|true|yes)'
+}
+
+function Invoke-DjangoManage {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $pythonExe = Join-Path $Root ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $pythonExe)) {
+        throw "Python venv introuvable. Lancez d'abord: uv sync"
+    }
+
+    $savedEnv = @{}
+    $usePostgresEnv = Test-ProjectDotEnvUsesPostgres -Root $Root
+    if ($usePostgresEnv) {
+        Import-ProjectDotEnv -Root $Root
+    } else {
+        foreach ($key in $script:DbEnvKeys) {
+            $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            if ($null -ne $item) {
+                $savedEnv[$key] = $item.Value
+                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    try {
+        $env:DJANGO_ENV = "dev"
+        $env:DJANGO_SETTINGS_MODULE = "config.settings"
+        Invoke-NativeCli -Exe $pythonExe -Arguments (@("manage.py") + $Arguments) `
+            -WorkingDirectory $Root -Quiet
+    } finally {
+        if (-not $usePostgresEnv) {
+            foreach ($key in $script:DbEnvKeys) {
+                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            }
+            foreach ($key in $savedEnv.Keys) {
+                Set-Item -Path "Env:$key" -Value $savedEnv[$key]
+            }
+        }
+    }
+}
 
 function Write-Failure {
     param([string]$Message)
@@ -100,6 +453,11 @@ function Write-Failure {
 
 function Restore-ShellPreferences {
     $ErrorActionPreference = $script:PreviousErrorActionPreference
+    if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
+        if ($null -ne $script:PreviousNativeCommandErrorPreference) {
+            $PSNativeCommandUseErrorActionPreference = $script:PreviousNativeCommandErrorPreference
+        }
+    }
     Set-StrictMode -Off
 }
 
@@ -852,11 +1210,16 @@ function Invoke-DjangoMigrate {
     }
 
     $savedEnv = @{}
-    foreach ($key in $script:DbEnvKeys) {
-        $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-        if ($null -ne $item) {
-            $savedEnv[$key] = $item.Value
-            Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+    $usePostgresEnv = Test-ProjectDotEnvUsesPostgres -Root $Root
+    if ($usePostgresEnv) {
+        Import-ProjectDotEnv -Root $Root
+    } else {
+        foreach ($key in $script:DbEnvKeys) {
+            $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            if ($null -ne $item) {
+                $savedEnv[$key] = $item.Value
+                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            }
         }
     }
 
@@ -867,11 +1230,13 @@ function Invoke-DjangoMigrate {
             "manage.py", "migrate", "--noinput", "--verbosity", "1"
         ) -WorkingDirectory $Root -Quiet
     } finally {
-        foreach ($key in $script:DbEnvKeys) {
-            Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-        }
-        foreach ($key in $savedEnv.Keys) {
-            Set-Item -Path "Env:$key" -Value $savedEnv[$key]
+        if (-not $usePostgresEnv) {
+            foreach ($key in $script:DbEnvKeys) {
+                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            }
+            foreach ($key in $savedEnv.Keys) {
+                Set-Item -Path "Env:$key" -Value $savedEnv[$key]
+            }
         }
     }
 }
@@ -888,11 +1253,16 @@ function Invoke-DjangoCreatesuperuser {
     }
 
     $savedEnv = @{}
-    foreach ($key in $script:DbEnvKeys) {
-        $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-        if ($null -ne $item) {
-            $savedEnv[$key] = $item.Value
-            Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+    $usePostgresEnv = Test-ProjectDotEnvUsesPostgres -Root $Root
+    if ($usePostgresEnv) {
+        Import-ProjectDotEnv -Root $Root
+    } else {
+        foreach ($key in $script:DbEnvKeys) {
+            $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            if ($null -ne $item) {
+                $savedEnv[$key] = $item.Value
+                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            }
         }
     }
 
@@ -923,6 +1293,11 @@ function Invoke-DjangoCreatesuperuser {
 
         Write-Host ""
         Write-Host "  Compte superuser requis pour /admin (DataStudio)" -ForegroundColor Cyan
+        if ($usePostgresEnv) {
+            Write-Host "  Base : PostgreSQL (fichier .env, meme base que docker compose)." -ForegroundColor DarkGray
+        } else {
+            Write-Host "  Base : SQLite (db.sqlite3). Activez .env + Docker pour PostgreSQL." -ForegroundColor DarkGray
+        }
         Write-Host "  Laissez vide uniquement si vous le creerez plus tard." -ForegroundColor DarkGray
         $skip = (Read-Host "Creer un superuser maintenant ? (O/n)").Trim()
         if ($skip -match '^[Nn]') {
@@ -934,11 +1309,13 @@ function Invoke-DjangoCreatesuperuser {
             "manage.py", "createsuperuser"
         ) -WorkingDirectory $Root
     } finally {
-        foreach ($key in $script:DbEnvKeys) {
-            Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-        }
-        foreach ($key in $savedEnv.Keys) {
-            Set-Item -Path "Env:$key" -Value $savedEnv[$key]
+        if (-not $usePostgresEnv) {
+            foreach ($key in $script:DbEnvKeys) {
+                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            }
+            foreach ($key in $savedEnv.Keys) {
+                Set-Item -Path "Env:$key" -Value $savedEnv[$key]
+            }
         }
     }
 }
@@ -1148,6 +1525,25 @@ import os
 DEBUG = True
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "web", "host.docker.internal"]
 
+
+def _load_dotenv() -> None:
+    """Charge .env a la racine (PostgreSQL hote = meme base que Docker db)."""
+    env_path = BASE_DIR / ".env"
+    if not env_path.is_file():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
 _use_pg = os.environ.get("DJANGO_USE_POSTGRES", "").lower() in ("1", "true", "yes")
 if _use_pg and os.environ.get("DJANGO_DB_HOST"):
     DATABASES = {
@@ -1247,7 +1643,7 @@ from rest_framework.views import APIView
 
 
 class HealthCheckView(APIView):
-    """GET /api/health/ — sans authentification."""
+    """GET /api/health/ - sans authentification."""
 
     permission_classes = [AllowAny]
 
@@ -1764,21 +2160,43 @@ from .permissions import IsSuperUser
 
 
 class AdminLoginView(APIView):
-    """POST /api/auth/login/ — JWT si superuser."""
+    """POST /api/auth/login/ - JWT si superuser."""
 
     permission_classes = [AllowAny]
 
     def post(self, request: Request) -> Response:
-        username = request.data.get("username", "")
-        password = request.data.get("password", "")
+        username = str(request.data.get("username", "")).strip()
+        password = str(request.data.get("password", ""))
+        if not username or not password:
+            return Response(
+                {
+                    "detail": "Identifiant et mot de passe requis.",
+                    "code": "missing_credentials",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         user = authenticate(
             request=request,
             username=username,
             password=password,
         )
-        if user is None or not user.is_superuser:
+        if user is None:
             return Response(
-                {"detail": "Identifiants invalides ou acces refuse."},
+                {
+                    "detail": "Identifiants incorrects pour cette base de donnees.",
+                    "code": "invalid_credentials",
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        if not user.is_superuser:
+            return Response(
+                {
+                    "detail": (
+                        "Compte reconnu mais acces refuse : superuser Django requis "
+                        "(docker compose exec web uv run python manage.py createsuperuser)."
+                    ),
+                    "code": "not_superuser",
+                },
                 status=status.HTTP_403_FORBIDDEN,
             )
         refresh = RefreshToken.for_user(user)
@@ -1795,7 +2213,7 @@ class AdminLoginView(APIView):
 
 
 class AdminSessionView(APIView):
-    """GET /api/auth/session/ — profil superuser connecte."""
+    """GET /api/auth/session/ - profil superuser connecte."""
 
     permission_classes = [IsAuthenticated, IsSuperUser]
 
@@ -1839,7 +2257,7 @@ _ADMIN_PERMS = [IsAuthenticated, IsSuperUser]
 
 
 class RegistryListView(APIView):
-    """GET /api/admin/registry/ — liste whitelist models."""
+    """GET /api/admin/registry/ - liste whitelist models."""
 
     permission_classes = _ADMIN_PERMS
 
@@ -1848,7 +2266,7 @@ class RegistryListView(APIView):
 
 
 class SchemaGlobalView(APIView):
-    """GET /api/admin/schema/ — schema global + liaisons."""
+    """GET /api/admin/schema/ - schema global + liaisons."""
 
     permission_classes = _ADMIN_PERMS
 
@@ -1857,7 +2275,7 @@ class SchemaGlobalView(APIView):
 
 
 class SchemaModelView(APIView):
-    """GET /api/admin/schema/<app>/<model>/ — schema d'une table."""
+    """GET /api/admin/schema/<app>/<model>/ - schema d'une table."""
 
     permission_classes = _ADMIN_PERMS
 
@@ -1866,7 +2284,7 @@ class SchemaModelView(APIView):
 
 
 class SchemaExportView(APIView):
-    """GET /api/admin/schema/export/ — Mermaid markdown (+ SVG a generer cote front V2)."""
+    """GET /api/admin/schema/export/ - Mermaid markdown (+ SVG a generer cote front V2)."""
 
     permission_classes = _ADMIN_PERMS
 
@@ -1882,7 +2300,7 @@ class SchemaExportView(APIView):
 
 
 class ModelRowsListView(APIView):
-    """GET/POST /api/admin/models/<app>/<model>/ — grille admin CRUD."""
+    """GET/POST /api/admin/models/<app>/<model>/ - grille admin CRUD."""
 
     permission_classes = _ADMIN_PERMS
 
@@ -1982,7 +2400,7 @@ urlpatterns = [
 '@
 
     Write-TextFile -Path (Join-Path $panelDir "models.py") -Content @'
-"""Pas de tables admin_panel — schema via models metier + migrations uniquement."""
+"""Pas de tables admin_panel - schema via models metier + migrations uniquement."""
 '@
 
     Write-TextFile -Path (Join-Path $panelDir "tests\test_registry.py") -Content @'
@@ -2343,7 +2761,7 @@ import "@/styles/globals.scss";
 
 export const metadata: Metadata = {
   title: "App",
-  description: "Frontend Next.js — API Django/DRF",
+  description: "Frontend Next.js - API Django/DRF",
 };
 
 export default function RootLayout({
@@ -2404,7 +2822,7 @@ export default function HomePage() {
 
     Write-TextFile -Path (Join-Path $fe ".env.example") -Content @"
 NEXT_PUBLIC_API_URL=http://localhost:8000
-# Docker dev (Server Components) — via port publie sur l'hote :
+# Docker dev (Server Components) - via port publie sur l'hote :
 # API_INTERNAL_URL=http://host.docker.internal:8000
 "@
 
@@ -2460,17 +2878,52 @@ CMD ["node", "server.js"]
 }
 
 function New-DockerStack {
-    param([Parameter(Mandatory)][string]$Root)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [int]$PostgresHostPort = 5433
+    )
 
     $scriptsDir = Join-Path $Root "scripts"
     New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
 
     Write-TextFile -Path (Join-Path $scriptsDir "docker-web-dev.sh") -Content @'
 #!/bin/sh
+# Entree Docker dev backend : attente db, migrations, runserver (evite $ dans compose.yml).
 set -e
 cd /app
+echo "Attente DNS + PostgreSQL (service db)..."
+attempt=0
+max=60
+while [ "$attempt" -lt "$max" ]; do
+  if getent hosts db >/dev/null 2>&1; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+if [ "$attempt" -ge "$max" ]; then
+  echo "ERREUR: impossible de resoudre l'hote db sur le reseau Docker." >&2
+  exit 1
+fi
+sleep 2
 uv sync
+attempt=0
+while [ "$attempt" -lt "$max" ]; do
+  if uv run python -c "import socket; s=socket.create_connection(('db',5432),3); s.close()"; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+if [ "$attempt" -ge "$max" ]; then
+  echo "ERREUR: PostgreSQL (db:5432) injoignable apres attente." >&2
+  exit 1
+fi
 uv run python manage.py migrate --noinput
+if [ -n "${DJANGO_SUPERUSER_USERNAME:-}" ] && [ -n "${DJANGO_SUPERUSER_PASSWORD:-}" ]; then
+  export DJANGO_SUPERUSER_EMAIL="${DJANGO_SUPERUSER_EMAIL:-${DJANGO_SUPERUSER_USERNAME}@local.test}"
+  uv run python manage.py createsuperuser --noinput || true
+fi
 exec uv run python manage.py runserver 0.0.0.0:8000
 '@
 
@@ -2551,7 +3004,7 @@ services:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: dev
     ports:
-      - "5433:5432"
+      - "POSTGRES_HOST_PORT:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -2565,42 +3018,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev
-    command:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        cd /app
-        echo "Attente DNS + PostgreSQL (service db)..."
-        attempt=0
-        max=60
-        while [ "$attempt" -lt "$max" ]; do
-          if getent hosts db >/dev/null 2>&1; then
-            break
-          fi
-          attempt=$((attempt + 1))
-          sleep 2
-        done
-        if [ "$attempt" -ge "$max" ]; then
-          echo "ERREUR: impossible de resoudre l'hote db sur le reseau Docker." >&2
-          exit 1
-        fi
-        sleep 2
-        uv sync
-        attempt=0
-        while [ "$attempt" -lt "$max" ]; do
-          if uv run python -c "import socket; s=socket.create_connection(('db',5432),3); s.close()"; then
-            break
-          fi
-          attempt=$((attempt + 1))
-          sleep 2
-        done
-        if [ "$attempt" -ge "$max" ]; then
-          echo "ERREUR: PostgreSQL (db:5432) injoignable apres attente." >&2
-          exit 1
-        fi
-        uv run python manage.py migrate --noinput
-        exec uv run python manage.py runserver 0.0.0.0:8000
+    command: ["/bin/sh", "scripts/docker-web-dev.sh"]
     volumes:
       - .:/app
       - backend_venv:/app/.venv
@@ -2608,6 +3026,10 @@ services:
       DJANGO_ENV: dev
       DJANGO_SETTINGS_MODULE: config.settings
       DJANGO_SECRET_KEY: dev-docker-only
+      # Superuser auto dans PostgreSQL Docker (optionnel) :
+      # DJANGO_SUPERUSER_USERNAME: admin
+      # DJANGO_SUPERUSER_PASSWORD: admin
+      # DJANGO_SUPERUSER_EMAIL: admin@local.test
       DJANGO_USE_POSTGRES: "1"
       DJANGO_DB_ENGINE: django.db.backends.postgresql
       DJANGO_DB_NAME: app
@@ -2662,6 +3084,7 @@ volumes:
   backend_venv:
   frontend_next:
 '@
+    $composeDev = $composeDev -replace 'POSTGRES_HOST_PORT', [string]$PostgresHostPort
 
     Write-TextFile -Path (Join-Path $Root ".gitattributes") -Content @'
 # Scripts shell : LF obligatoire pour Docker/Linux
@@ -2811,6 +3234,17 @@ def test_login_rejects_non_superuser(api_client, db) -> None:
         format="json",
     )
     assert response.status_code == 403
+    assert response.json()["code"] == "not_superuser"
+
+
+def test_login_rejects_wrong_password(api_client, superuser) -> None:
+    response = api_client.post(
+        "/api/auth/login/",
+        {"username": "admin", "password": "wrong-password"},
+        format="json",
+    )
+    assert response.status_code == 401
+    assert response.json()["code"] == "invalid_credentials"
 
 
 @pytest.mark.django_db
@@ -2898,10 +3332,10 @@ database "PostgreSQL" as db
     Write-TextFile -Path (Join-Path $cursorDir "app-architecture.uml") -Content $uml
 
     Write-TextFile -Path (Join-Path $cursorDir "AGENTS.md") -Content @"
-# Agents Cursor — monorepo Django + Next.js
+# Agents Cursor - monorepo Django + Next.js
 
 ## Lead par defaut
-**@ProjectManager** — plan d'action, dispatch, Definition of Done.
+**@ProjectManager** - plan d'action, dispatch, Definition of Done.
 
 ## Matrice rapide
 | Sujet | Agent |
@@ -3020,7 +3454,7 @@ pnpm dev
 
     $dk = if ($HasDocker) { @"
 
-## Docker (dev — runserver + Next dev)
+## Docker (dev - runserver + Next dev)
 ``````bash
 docker compose up --build
 ``````
@@ -3049,7 +3483,7 @@ $env:DOCKER_BUILDKIT = "1"
 docker compose up --build
 ``````
 
-Les paquets frontend sont installes au **build** de l'image (``pnpm install --frozen-lockfile`` si ``pnpm-lock.yaml`` present — genere a l'init).
+Les paquets frontend sont installes au **build** de l'image (``pnpm install --frozen-lockfile`` si ``pnpm-lock.yaml`` present - genere a l'init).
 Le conteneur demarre directement sur ``pnpm dev`` (pas de reinstall au ``up``).
 Le volume anonyme ``/app/node_modules`` conserve les deps de l'image (demarrage rapide).
 Apres modification de ``package.json`` : ``docker compose build frontend --no-cache``.
@@ -3057,6 +3491,7 @@ Apres modification de ``package.json`` : ``docker compose build frontend --no-ca
 Depannage :
 - ``web`` en ``Restarting`` : ``docker compose logs web`` (souvent PostgreSQL : ``failed to resolve host 'db'``).
 - Port 5432 deja utilise sous Windows : Postgres Docker mappe sur **5433** (hote) ; arreter un Postgres local ou changer le mapping.
+- ``authentification par mot de passe echouee`` pour ``app`` : le port 5433 n'est pas le bon Postgres, ou volume obsolete. ``docker compose down -v`` puis ``docker compose up -d db``. Mot de passe attendu : ``dev`` (voir ``.env`` et ``POSTGRES_PASSWORD`` dans compose).
 - ``fetch failed`` / ``ECONNREFUSED`` sur ``/admin`` : ``curl http://localhost:8000/api/health/`` ; sous Docker Desktop utiliser ``API_INTERNAL_URL=http://host.docker.internal:8000`` + ``extra_hosts: host-gateway``.
 - ``app-paths-manifest.json`` ENOENT : supprimer ``frontend/.next`` sur l'hote, volume ``frontend_next`` dans compose, puis ``docker compose up --build``.
 - ``ERR_PNPM_NO_LOCKFILE`` : ``cd frontend && pnpm install`` (cree ``pnpm-lock.yaml``), puis ``docker compose build frontend``.
@@ -3068,20 +3503,27 @@ Depannage :
 - Admin Next.js : http://localhost:3000/admin
 - Login : http://localhost:3000/login (superuser Django uniquement)
 
-## Compte superuser (obligatoire pour /admin)
+## Base de donnees (PostgreSQL)
 
-Propose a la fin du script d'init (etape **Superuser Django**), ou manuellement :
+Avec Docker, le script genere un fichier ``.env`` : Django utilise **PostgreSQL** sur ``localhost:5433`` (meme instance que le service ``db`` du compose).
 
 ``````bash
+docker compose up -d db
+uv run python manage.py migrate
 uv run python manage.py createsuperuser
+docker compose up
 ``````
 
-Puis connexion sur ``/login``. L'API ``/api/admin/*`` exige un JWT Bearer (superuser).
+Sans ``.env`` / sans ``DJANGO_USE_POSTGRES=1`` : fallback SQLite (``db.sqlite3``).
+
+## Compte superuser (obligatoire pour /admin)
+
+Cree a l'init ou via ``createsuperuser`` - **superuser** requis pour ``/login``.
 
 ## Backend
 
 App metier : ``apps.$AppName`` (ex. ``Transaction``)
-Admin API : ``apps.admin_panel`` — registry whitelist, schema, stubs CRUD
+Admin API : ``apps.admin_panel`` - registry whitelist, schema, stubs CRUD
 
 Django ``/django-admin/`` : fallback **dev uniquement** (``DJANGO_ADMIN_ENABLED``).
 Desactive en prod dans ``config/settings/prod.py``.
@@ -3139,7 +3581,9 @@ function Test-ProjectStructure {
             "frontend\src\app\page.tsx",
             "frontend\src\app\admin\page.tsx",
             "frontend\src\app\login\page.tsx",
-            "frontend\src\lib\admin-api.ts",
+            "frontend\src\lib\admin-api-client.ts",
+            "frontend\src\lib\admin-api-server.ts",
+            "frontend\src\lib\auth-cookie-names.ts",
             "frontend\src\lib\schema-types.ts",
             "frontend\src\lib\admin-studio-types.ts",
             "frontend\src\lib\admin-studio-adapter.ts",
@@ -3386,8 +3830,22 @@ try {
 
     if ($doDocker) {
         Start-PipelineStep -Title "Docker" -Detail "Dockerfile + compose dev/prod"
-        New-DockerStack -Root $root
+        $postgresHostPort = Find-AvailablePostgresHostPort
+        Write-Host "     Port PostgreSQL hote : $postgresHostPort" -ForegroundColor DarkGray
+        New-DockerStack -Root $root -PostgresHostPort $postgresHostPort
         Complete-PipelineStep
+
+        Start-PipelineStep -Title "PostgreSQL (.env)" -Detail "base Django unique hote + Docker"
+        Write-ProjectDotEnvForDocker -Root $root -PostgresHostPort $postgresHostPort
+        try {
+            Start-ComposeDatabaseService -Root $root -TimeoutSeconds 90
+            $pgPortMsg = Get-ProjectPostgresHostPort -Root $root
+            Complete-PipelineStep -Message "db sur localhost:$pgPortMsg"
+        } catch {
+            Write-Host "     $($_.Exception.Message)" -ForegroundColor DarkYellow
+            Write-Host "     Demarrez plus tard : docker compose up -d db" -ForegroundColor DarkYellow
+            Complete-PipelineStep -Message "db a demarrer manuellement"
+        }
     } else {
         Write-Host "     (SkipDocker)" -ForegroundColor DarkYellow
     }
@@ -3438,11 +3896,28 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
         Write-Host "     Avertissement: -SkipMigrate detecte, migration ignoree." -ForegroundColor DarkYellow
         Complete-PipelineStep -Message "skipped"
     } else {
-        Write-Host "     makemigrations + migrate (SQLite locale)" -ForegroundColor DarkGray
-        Invoke-NativeCli -Exe (Join-Path $root ".venv\Scripts\python.exe") -Arguments @(
-            "manage.py", "makemigrations", $AppName, "--noinput"
-        ) -WorkingDirectory $root -Quiet
-        Invoke-DjangoMigrate -Root $root -TimeoutSeconds $MigrateTimeoutSeconds
+        $dbLabel = if (Test-ProjectDotEnvUsesPostgres -Root $root) {
+            $pgPortLabel = Get-ProjectPostgresHostPort -Root $root
+            "PostgreSQL localhost:$pgPortLabel (.env)"
+        } else {
+            "SQLite"
+        }
+        Write-Host "     makemigrations + migrate ($dbLabel)" -ForegroundColor DarkGray
+        if (Test-ProjectDotEnvUsesPostgres -Root $root) {
+            if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+                throw "Docker requis pour PostgreSQL (.env) : installez Docker Desktop"
+            }
+            try {
+                Ensure-ComposeDatabaseForDjango -Root $root -TimeoutSeconds 60
+            } catch {
+                throw @"
+PostgreSQL indisponible pour les migrations : $($_.Exception.Message)
+Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v && docker compose up -d db
+"@
+            }
+        }
+        Invoke-DjangoManage -Root $root -Arguments @("makemigrations", $AppName, "--noinput")
+        Invoke-DjangoManage -Root $root -Arguments @("migrate", "--noinput", "--verbosity", "1")
         Complete-PipelineStep -Message "migrations appliquees"
     }
 
@@ -3450,7 +3925,12 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
         Start-PipelineStep -Title "Superuser Django" -Detail "createsuperuser pour /admin"
         try {
             Invoke-DjangoCreatesuperuser -Root $root -NoInteractive:$NoInteractive.IsPresent
-            Complete-PipelineStep -Message "compte admin"
+            $suMsg = if (Test-ProjectDotEnvUsesPostgres -Root $root) {
+                "compte admin (PostgreSQL)"
+            } else {
+                "compte admin (SQLite)"
+            }
+            Complete-PipelineStep -Message $suMsg
         } catch {
             Write-Host "     createsuperuser echoue : $($_.Exception.Message)" -ForegroundColor DarkYellow
             Write-Host "     Relancez : uv run python manage.py createsuperuser" -ForegroundColor DarkYellow

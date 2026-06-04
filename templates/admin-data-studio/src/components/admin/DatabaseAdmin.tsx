@@ -23,7 +23,7 @@ import {
   Terminal,
 } from "lucide-react";
 import type { GlobalSchema, ModelSchema } from "@/lib/schema-types";
-import type { RegistryEntry } from "@/lib/admin-api";
+import type { RegistryEntry } from "@/lib/admin-api-types";
 import { buildStudioTables } from "@/lib/admin-studio-adapter";
 import type { StudioTable, StudioView } from "@/lib/admin-studio-types";
 import { AdminDataTable } from "@/components/admin/AdminDataTable";
@@ -65,6 +65,15 @@ export function DatabaseAdmin({
     return s;
   });
   const [rowCounts, setRowCounts] = useState<Record<string, number>>({});
+
+  const handleRowCount = useCallback((tableId: string, count: number) => {
+    setRowCounts((prev) => {
+      if (prev[tableId] === count) {
+        return prev;
+      }
+      return { ...prev, [tableId]: count };
+    });
+  }, []);
 
   const selectedTable = tables.find((t) => t.id === selectedId) ?? null;
 
@@ -272,9 +281,7 @@ export function DatabaseAdmin({
                     {activeView === "data" ? (
                       <AdminDataTable
                         table={selectedTable}
-                        onRowCount={(n) =>
-                          setRowCounts((prev) => ({ ...prev, [selectedTable.id]: n }))
-                        }
+                        onRowCount={(n) => handleRowCount(selectedTable.id, n)}
                       />
                     ) : null}
                     {activeView === "structure" ? (

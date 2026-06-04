@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { ADMIN_ACCESS_COOKIE } from "@/lib/auth-cookies";
+import { ADMIN_ACCESS_COOKIE } from "@/lib/auth-cookie-names";
 
 function getDjangoBase(): string {
   return (

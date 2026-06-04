@@ -1,5 +1,5 @@
 import type { ModelSchema } from "@/lib/schema-types";
-import type { RegistryEntry } from "@/lib/admin-api";
+import type { RegistryEntry } from "@/lib/admin-api-types";
 import type { StudioColumn, StudioTable } from "@/lib/admin-studio-types";
 
 function djangoTypeToSql(typeName: string): string {

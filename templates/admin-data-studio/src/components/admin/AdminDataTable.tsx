@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -24,7 +24,7 @@ import {
   deleteModelRow,
   fetchModelRows,
   updateModelRow,
-} from "@/lib/admin-api";
+} from "@/lib/admin-api-client";
 import { RowFormDialog } from "@/components/admin/RowFormDialog";
 import type { StudioRow, StudioTable } from "@/lib/admin-studio-types";
 
@@ -59,20 +59,25 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
   const [activeRow, setActiveRow] = useState<StudioRow | null>(null);
   const [formData, setFormData] = useState<StudioRow>({});
 
+  const onRowCountRef = useRef(onRowCount);
+  useEffect(() => {
+    onRowCountRef.current = onRowCount;
+  }, [onRowCount]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetchModelRows(table.appLabel, table.modelName);
       setData(res.results ?? []);
       setPkField(res.pk_field ?? "id");
-      onRowCount?.(res.count ?? res.results?.length ?? 0);
+      onRowCountRef.current?.(res.count ?? res.results?.length ?? 0);
     } catch {
       setData([]);
-      onRowCount?.(0);
+      onRowCountRef.current?.(0);
     } finally {
       setLoading(false);
     }
-  }, [table.appLabel, table.modelName, onRowCount]);
+  }, [table.appLabel, table.modelName]);
 
   useEffect(() => {
     void load();
