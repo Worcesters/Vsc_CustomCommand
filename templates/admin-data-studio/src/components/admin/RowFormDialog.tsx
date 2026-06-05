@@ -39,6 +39,8 @@ export function RowFormDialog({
 }: RowFormDialogProps) {
   if (!open) return null;
 
+  const formColumns = columns.filter((col) => col.editable !== false);
+
   return (
     <div className="ds-modal" role="dialog" aria-modal="true" aria-labelledby="ds-modal-title">
       <button type="button" className="ds-modal__backdrop" onClick={onClose} aria-label="Fermer" />
@@ -50,7 +52,7 @@ export function RowFormDialog({
           </button>
         </header>
         <div className="ds-modal__body">
-          {columns.map((col) => {
+          {formColumns.map((col) => {
             const isPk = col.primaryKey || col.name === pkField;
             const disabled = mode === "edit" && isPk;
             const inputType = inputTypeForColumn(col);

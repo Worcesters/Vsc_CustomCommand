@@ -3,8 +3,9 @@ export type StudioColumn = {
   type: string;
   nullable: boolean;
   primaryKey: boolean;
+  editable?: boolean;
   foreignKey?: { table: string; column: string; targetId: string };
-  defaultValue?: string;
+  defaultValue?: string | number | boolean;
 };
 
 export type StudioTable = {

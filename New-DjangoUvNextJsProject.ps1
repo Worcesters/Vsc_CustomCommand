@@ -2084,6 +2084,18 @@ def list_registry_entries() -> list[RegistryEntry]:
     return list(ADMIN_MODEL_REGISTRY)
 
 
+def _schema_field_default(field: models.Field) -> object | None:
+    """Valeur par defaut serialisable pour le schema API."""
+    if not field.has_default():
+        return None
+    default_val = field.get_default()
+    if callable(default_val):
+        return None
+    if hasattr(default_val, "isoformat"):
+        return default_val.isoformat()
+    return default_val
+
+
 def get_model_schema(app_label: str, model_name: str) -> dict[str, object]:
     """Schema d'un model (champs, types, contraintes, relations)."""
     model = apps.get_model(app_label, model_name)
@@ -2096,7 +2108,13 @@ def get_model_schema(app_label: str, model_name: str) -> dict[str, object]:
             "type": field.__class__.__name__,
             "nullable": getattr(field, "null", False),
             "unique": getattr(field, "unique", False),
+            "editable": getattr(field, "editable", True),
+            "blank": getattr(field, "blank", False),
         }
+        if field.has_default():
+            default_val = _schema_field_default(field)
+            if default_val is not None:
+                info["default"] = default_val
         if isinstance(field, (models.ForeignKey, models.OneToOneField)):
             info["relation"] = "FK"
             info["related_model"] = field.related_model._meta.label_lower
@@ -2215,7 +2233,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.apps import apps as django_apps
-from django.db import models
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, models
 from django.utils.dateparse import parse_date, parse_datetime
 
 from apps.admin_panel.registry import ADMIN_MODEL_REGISTRY
@@ -2257,9 +2276,9 @@ def serialize_instance(model: type[models.Model], instance: models.Model) -> dic
 def _coerce_field_value(field: models.Field, raw: object) -> object:
     """Convertit une valeur API vers le type ORM."""
     if raw is None or raw == "":
-        if field.null:
+        if field.null or field.blank:
             return None
-        return raw
+        raise ValueError(f"Champ requis : {field.name}")
     if isinstance(field, models.BooleanField):
         if isinstance(raw, bool):
             return raw
@@ -2316,7 +2335,12 @@ def create_model_row(app_label: str, model_name: str, payload: dict[str, Any]) -
     """Cree une ligne via ORM (whitelist registry)."""
     model = _resolve_model(app_label, model_name)
     data = _clean_payload(model, payload, exclude_pk=True)
-    instance = model.objects.create(**data)
+    try:
+        instance = model(**data)
+        instance.full_clean()
+        instance.save()
+    except (ValidationError, IntegrityError) as exc:
+        raise ValueError(str(exc)) from exc
     return serialize_instance(model, instance)
 
 
@@ -2780,6 +2804,9 @@ export type ModelField = {
   type: string;
   nullable: boolean;
   unique: boolean;
+  editable?: boolean;
+  blank?: boolean;
+  default?: string | number | boolean | null;
   relation?: string;
   related_model?: string;
 };

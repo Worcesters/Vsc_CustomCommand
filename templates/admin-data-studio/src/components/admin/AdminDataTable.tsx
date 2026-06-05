@@ -38,7 +38,27 @@ const PAGE_SIZE = 10;
 function emptyRow(table: StudioTable): StudioRow {
   const row: StudioRow = {};
   table.columns.forEach((col) => {
-    row[col.name] = col.type === "boolean" ? false : null;
+    if (col.editable === false) {
+      return;
+    }
+    if (col.type === "boolean") {
+      row[col.name] = false;
+      return;
+    }
+    if (col.defaultValue != null && col.defaultValue !== "") {
+      if (
+        col.type.includes("int") ||
+        col.type === "decimal" ||
+        col.type === "serial" ||
+        col.type === "bigserial"
+      ) {
+        row[col.name] = Number(col.defaultValue);
+      } else {
+        row[col.name] = col.defaultValue;
+      }
+      return;
+    }
+    row[col.name] = col.nullable ? null : "";
   });
   return row;
 }
@@ -144,6 +164,17 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
   };
 
   const submitForm = async () => {
+    const missing = table.columns.filter(
+      (col) =>
+        col.editable !== false &&
+        !col.primaryKey &&
+        !col.nullable &&
+        (formData[col.name] == null || formData[col.name] === ""),
+    );
+    if (missing.length > 0) {
+      alert(`Champs requis : ${missing.map((c) => c.name).join(", ")}`);
+      return;
+    }
     setSaving(true);
     try {
       if (formOpen === "create") {
@@ -260,8 +291,8 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
                 {table.columns.map((col) => (
                   <th key={col.name} onClick={() => toggleSort(col.name)}>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                      {col.primaryKey ? <Key size={12} color="#eab308" /> : null}
-                      {col.foreignKey ? <LinkIcon size={12} color="#60a5fa" /> : null}
+                      {col.primaryKey ? <Key size={12} className="ds-icon--pk" /> : null}
+                      {col.foreignKey ? <LinkIcon size={12} className="ds-icon--fk" /> : null}
                       {col.name}
                       {sortColumn === col.name ? (
                         sortDir === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />

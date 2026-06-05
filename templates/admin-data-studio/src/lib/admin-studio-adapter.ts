@@ -35,9 +35,13 @@ export function buildStudioTables(
       const col: StudioColumn = {
         name: field.name,
         type: djangoTypeToSql(field.type),
-        nullable: Boolean(field.nullable),
+        nullable: Boolean(field.nullable || field.blank),
         primaryKey: field.type === "AutoField" || field.type === "BigAutoField",
+        editable: field.editable !== false,
       };
+      if (field.default != null && field.default !== "") {
+        col.defaultValue = field.default as string | number | boolean;
+      }
       if (field.related_model && field.relation === "FK") {
         const [relApp, relModel] = field.related_model.split(".");
         col.foreignKey = {

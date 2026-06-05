@@ -36,7 +36,7 @@ function ErTableNode({ data }: NodeProps<Node<ErNodeData>>) {
   const headClass = `ds-er-node__head ds-er-node__head--c${colorIndex % 3}`;
   return (
     <div className={`ds-er-node${isSelected ? " ds-er-node--selected" : ""}`}>
-      <Handle type="target" position={Position.Left} />
+      <Handle type="target" position={Position.Left} isConnectable={false} />
       <div className={headClass}>
         <span>{table.name}</span>
         <span style={{ float: "right", opacity: 0.85, fontSize: "0.75rem" }}>
@@ -46,8 +46,8 @@ function ErTableNode({ data }: NodeProps<Node<ErNodeData>>) {
       <div className="ds-er-node__body">
         {table.columns.slice(0, 8).map((col) => (
           <div key={col.name} className="ds-er-node__col">
-            {col.primaryKey ? <Key size={12} color="#eab308" /> : null}
-            {col.foreignKey ? <LinkIcon size={12} color="#60a5fa" /> : null}
+            {col.primaryKey ? <Key size={12} className="ds-icon--pk" /> : null}
+            {col.foreignKey ? <LinkIcon size={12} className="ds-icon--fk" /> : null}
             <span className="ds-er-node__col-name">{col.name}</span>
             <span className="ds-er-node__col-type">{col.type}</span>
           </div>
@@ -58,7 +58,7 @@ function ErTableNode({ data }: NodeProps<Node<ErNodeData>>) {
           </div>
         ) : null}
       </div>
-      <Handle type="source" position={Position.Right} />
+      <Handle type="source" position={Position.Right} isConnectable={false} />
     </div>
   );
 }
@@ -136,7 +136,7 @@ function AdminERDiagramInner({
     if (!captureRef.current) return;
     const dataUrl = await toSvg(captureRef.current, {
       cacheBust: true,
-      backgroundColor: "#0f1117",
+      backgroundColor: "#080808",
     });
     const anchor = document.createElement("a");
     anchor.href = dataUrl;
@@ -181,6 +181,10 @@ function AdminERDiagramInner({
           edges={edges}
           nodeTypes={nodeTypes}
           onNodeClick={onNodeClick}
+          nodesDraggable
+          nodesConnectable={false}
+          elementsSelectable
+          selectNodesOnDrag={false}
           fitView
           minZoom={0.25}
           maxZoom={1.5}
