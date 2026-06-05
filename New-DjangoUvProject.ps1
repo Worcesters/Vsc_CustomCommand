@@ -91,6 +91,7 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 }
 $script:ScaffoldFailed = $false
 $script:PreviousNativeCommandErrorPreference = $null
+$script:ComposeDatabaseReady = $false
 $script:DbEnvKeys = @(
     "DJANGO_DB_HOST", "DJANGO_DB_ENGINE", "DJANGO_DB_NAME",
     "DJANGO_DB_USER", "DJANGO_DB_PASSWORD", "DJANGO_DB_PORT", "DJANGO_USE_POSTGRES"
@@ -178,7 +179,7 @@ function Set-ProjectPostgresHostPort {
         [System.IO.File]::WriteAllText($envFile, ($envLines -join "`n") + "`n", $utf8NoBom)
     }
 
-    foreach ($composeName in @("docker-compose.yml", "docker-compose.dev.yml")) {
+    foreach ($composeName in @("docker-compose.yml")) {
         $composePath = Join-Path $Root $composeName
         if (-not (Test-Path -LiteralPath $composePath)) {
             continue
@@ -205,19 +206,48 @@ function Get-DockerCliOutputText {
         }) -join "`n").Trim()
 }
 
+function Test-PostgresHostTcpReady {
+    param([Parameter(Mandatory)][int]$Port)
+
+    $client = $null
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $async = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
+        $completed = $async.AsyncWaitHandle.WaitOne(1500)
+        if ($completed -and $client.Connected) {
+            $client.EndConnect($async)
+            return $true
+        }
+        return $false
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $client) {
+            $client.Close()
+            $client.Dispose()
+        }
+    }
+}
+
 function Test-ComposeDatabaseAcceptsConnections {
-    param([Parameter(Mandatory)][string]$Root)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [switch]$QuickTcpOnly
+    )
+
+    $hostPort = Get-ProjectPostgresHostPort -Root $Root
+    if (-not (Test-PostgresHostTcpReady -Port $hostPort)) {
+        return $false
+    }
+    if ($QuickTcpOnly) {
+        return $true
+    }
 
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     Push-Location -LiteralPath $Root
     try {
         & docker compose exec -T db pg_isready -U app -d app 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            return $false
-        }
-        $env:PGPASSWORD = "dev"
-        & docker compose exec -T -e PGPASSWORD=dev db psql -U app -d app -c "SELECT 1" 2>$null | Out-Null
         return ($LASTEXITCODE -eq 0)
     } finally {
         Pop-Location
@@ -243,7 +273,8 @@ function Invoke-DockerCompose {
         $argsText = $ComposeArguments -join " "
         $detail = Get-DockerCliOutputText -Output $output
         $isDbUp = $argsText -match "compose\s+up\b" -and $argsText -match "\bdb\b"
-        if ($isDbUp -and (Test-ComposeDatabaseAcceptsConnections -Root $Root)) {
+        if ($isDbUp -and (Test-ComposeDatabaseAcceptsConnections -Root $Root -QuickTcpOnly)) {
+            $script:ComposeDatabaseReady = $true
             Write-Host "     docker compose up : service db deja operationnel" -ForegroundColor DarkGray
             return
         }
@@ -263,9 +294,15 @@ function Ensure-ComposeDatabaseForDjango {
         [int]$TimeoutSeconds = 60
     )
 
-    if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+    if ($script:ComposeDatabaseReady) {
+        $hostPort = Get-ProjectPostgresHostPort -Root $Root
+        Write-Host "     PostgreSQL deja verifie (etape 8, localhost:$hostPort)" -ForegroundColor DarkGray
+        return
+    }
+    if (Test-ComposeDatabaseAcceptsConnections -Root $Root -QuickTcpOnly) {
         $hostPort = Get-ProjectPostgresHostPort -Root $Root
         Write-Host "     PostgreSQL deja operationnel (localhost:$hostPort)" -ForegroundColor DarkGray
+        $script:ComposeDatabaseReady = $true
         return
     }
     Start-ComposeDatabaseService -Root $Root -TimeoutSeconds $TimeoutSeconds
@@ -333,8 +370,9 @@ function Start-ComposeDatabaseService {
         throw "Docker introuvable - impossible de demarrer PostgreSQL (service db)."
     }
 
-    if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+    if (Test-ComposeDatabaseAcceptsConnections -Root $Root -QuickTcpOnly) {
         $readyPort = Get-ProjectPostgresHostPort -Root $Root
+        $script:ComposeDatabaseReady = $true
         Write-Host "     PostgreSQL deja pret (localhost:$readyPort)" -ForegroundColor DarkGray
         return
     }
@@ -376,14 +414,15 @@ Arretez l'autre conteneur (docker ps) ou changez le mapping dans docker-compose.
     try {
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
         while ((Get-Date) -lt $deadline) {
-            if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+            if (Test-PostgresHostTcpReady -Port $hostPort) {
                 break
             }
-            Start-Sleep -Seconds 2
+            Start-Sleep -Seconds 1
         }
-        if (-not (Test-ComposeDatabaseAcceptsConnections -Root $Root)) {
+        if (-not (Test-PostgresHostTcpReady -Port $hostPort)) {
             throw "PostgreSQL (service db) non pret apres ${TimeoutSeconds}s"
         }
+        $script:ComposeDatabaseReady = $true
         Write-Host "     PostgreSQL pret (localhost:$hostPort, user app / password dev)" -ForegroundColor DarkGray
     } finally {
         Pop-Location
@@ -400,6 +439,112 @@ function Test-ProjectDotEnvUsesPostgres {
     }
     $raw = Get-Content -LiteralPath $envFile -Raw -Encoding UTF8
     return $raw -match '(?m)DJANGO_USE_POSTGRES\s*=\s*(1|true|yes)'
+}
+
+function Test-AppDefinesModels {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$AppName
+    )
+
+    $modelsPath = Join-Path $Root "apps\$AppName\models.py"
+    if (-not (Test-Path -LiteralPath $modelsPath)) {
+        return $false
+    }
+    $content = Get-Content -LiteralPath $modelsPath -Raw -Encoding UTF8
+    return $content -match 'class\s+\w+\s*\([^)]*models\.Model'
+}
+
+function Set-DjangoManageEnvironment {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [ref]$SavedEnv
+    )
+
+    $usePostgresEnv = Test-ProjectDotEnvUsesPostgres -Root $Root
+    if ($usePostgresEnv) {
+        Import-ProjectDotEnv -Root $Root
+    } else {
+        foreach ($key in $script:DbEnvKeys) {
+            $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            if ($null -ne $item) {
+                $SavedEnv.Value[$key] = $item.Value
+                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    $env:DJANGO_ENV = "dev"
+    $env:DJANGO_SETTINGS_MODULE = "config.settings"
+    return $usePostgresEnv
+}
+
+function Restore-DjangoManageEnvironment {
+    param(
+        [bool]$UsePostgresEnv,
+        [hashtable]$SavedEnv
+    )
+
+    if (-not $UsePostgresEnv) {
+        foreach ($key in $script:DbEnvKeys) {
+            Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
+        }
+        foreach ($key in $SavedEnv.Keys) {
+            Set-Item -Path "Env:$key" -Value $SavedEnv[$key]
+        }
+    }
+}
+
+function Invoke-DjangoMigrationBootstrap {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$AppName,
+        [switch]$RunMakemigrations
+    )
+
+    $pythonExe = Join-Path $Root ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $pythonExe)) {
+        throw "Python venv introuvable. Lancez d'abord: uv sync"
+    }
+
+    $savedEnv = @{}
+    $usePostgresEnv = Set-DjangoManageEnvironment -Root $Root -SavedEnv ([ref]$savedEnv)
+    $bootstrapPath = Join-Path $Root ".migrate_bootstrap.py"
+
+    $pyLines = @(
+        "from __future__ import annotations",
+        "",
+        "import os",
+        "import sys",
+        "",
+        "_ROOT = os.path.dirname(os.path.abspath(__file__))",
+        "if _ROOT not in sys.path:",
+        "    sys.path.insert(0, _ROOT)",
+        "os.chdir(_ROOT)",
+        "",
+        "import django",
+        "from django.core.management import call_command",
+        "",
+        "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')",
+        "os.environ['DJANGO_ENV'] = 'dev'",
+        "django.setup()"
+    )
+    if ($RunMakemigrations) {
+        $pyLines += "call_command('makemigrations', '$AppName', verbosity=1, interactive=False)"
+    }
+    $pyLines += "call_command('migrate', verbosity=1, interactive=False)"
+    $pyContent = ($pyLines -join "`n") + "`n"
+
+    try {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($bootstrapPath, $pyContent, $utf8NoBom)
+        Write-Host "     Chargement Django + migrate (sortie ci-dessous)..." -ForegroundColor DarkGray
+        Invoke-NativeCli -Exe $pythonExe -Arguments @($bootstrapPath) -WorkingDirectory $Root
+    } finally {
+        if (Test-Path -LiteralPath $bootstrapPath) {
+            Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction SilentlyContinue
+        }
+        Restore-DjangoManageEnvironment -UsePostgresEnv $usePostgresEnv -SavedEnv $savedEnv
+    }
 }
 
 function Invoke-DjangoManage {
@@ -1097,6 +1242,35 @@ function Resolve-ExecutablePath {
     return $cmd.Source
 }
 
+function Resolve-NodeToolPath {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $nodeDirs = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+        $nodeDirs += (Join-Path $env:ProgramFiles "nodejs")
+    }
+    if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+        $nodeDirs += (Join-Path ${env:ProgramFiles(x86)} "nodejs")
+    }
+    foreach ($nodeDir in $nodeDirs) {
+        if (-not (Test-Path -LiteralPath $nodeDir)) { continue }
+        foreach ($suffix in @(".cmd", ".exe", "")) {
+            $candidate = Join-Path $nodeDir ($Name + $suffix)
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+    }
+    return Resolve-ExecutablePath -Name $Name
+}
+
+function Format-CliArgumentString {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    return ($Arguments | ForEach-Object {
+            if ($_ -match '\s') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+        }) -join " "
+}
+
 function Invoke-CheckedCommand {
     param(
         [Parameter(Mandatory)][string]$Exe,
@@ -1106,15 +1280,26 @@ function Invoke-CheckedCommand {
         [int]$TimeoutSeconds = 0,
         [hashtable]$EnvironmentOverrides = @{}
     )
-    $exePath = Resolve-ExecutablePath -Name $Exe
+    $nodeTools = @("node", "npm", "npx", "pnpm", "corepack")
+    $exePath = if ($Exe -in $nodeTools) {
+        Resolve-NodeToolPath -Name $Exe
+    } else {
+        Resolve-ExecutablePath -Name $Exe
+    }
     if (-not $exePath) {
         throw "Executable introuvable : $Exe"
     }
+    $argString = Format-CliArgumentString -Arguments $Arguments
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $exePath
-    $psi.Arguments = ($Arguments | ForEach-Object {
-            if ($_ -match '\s') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
-        }) -join " "
+    $isWindows = ($IsWindows -or $env:OS -eq "Windows_NT")
+    $ext = [System.IO.Path]::GetExtension($exePath).ToLowerInvariant()
+    if ($isWindows -and $ext -in @(".cmd", ".bat")) {
+        $psi.FileName = if ([string]::IsNullOrWhiteSpace($env:ComSpec)) { "cmd.exe" } else { $env:ComSpec }
+        $psi.Arguments = "/d /s /c `"`"$exePath`" $argString`""
+    } else {
+        $psi.FileName = $exePath
+        $psi.Arguments = $argString
+    }
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -1179,7 +1364,12 @@ function Invoke-NativeCli {
         [Parameter(Mandatory)][string]$WorkingDirectory,
         [switch]$Quiet
     )
-    $exePath = Resolve-ExecutablePath -Name $Exe
+    $nodeTools = @("node", "npm", "npx", "pnpm", "corepack")
+    $exePath = if ($Exe -in $nodeTools) {
+        Resolve-NodeToolPath -Name $Exe
+    } else {
+        Resolve-ExecutablePath -Name $Exe
+    }
     if (-not $exePath) {
         throw "Executable introuvable : $Exe"
     }
@@ -1785,23 +1975,11 @@ function New-CoreModels {
     Write-TextFile -Path $modelsPath -Content @"
 from __future__ import annotations
 
-from django.db import models
+"""Modeles metier de l'app $AppName.
 
-
-class Transaction(models.Model):
-    '''Exemple de model metier enregistre dans l'admin custom.'''
-
-    label = models.CharField(max_length=120)
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
-    currency = models.CharField(max_length=3, default="EUR")
-    status = models.CharField(max_length=32, default="draft")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-
-    def __str__(self) -> str:
-        return f"{self.label} ({self.amount} {self.currency})"
+L'admin DataStudio expose par defaut ``auth.User`` (voir ``apps.admin_panel.registry``).
+Ajoutez ici vos modeles metier supplementaires.
+"""
 "@
 }
 
@@ -1842,9 +2020,9 @@ class RegistryEntry(TypedDict):
 # Whitelist des models exposes dans l'admin Next.js (pas de DDL via UI).
 ADMIN_MODEL_REGISTRY: list[RegistryEntry] = [
     {
-        "app_label": "$AppName",
-        "model_name": "transaction",
-        "label": "Transactions",
+        "app_label": "auth",
+        "model_name": "user",
+        "label": "Utilisateurs",
         "permissions": ["list", "create", "edit", "delete", "schema"],
     },
 ]
@@ -2045,10 +2223,18 @@ def _serialize_value(value: object) -> object:
     return value
 
 
+def _is_auth_user_model(model: type[models.Model]) -> bool:
+    return model._meta.label_lower == "auth.user"
+
+
 def serialize_instance(model: type[models.Model], instance: models.Model) -> dict[str, Any]:
     """Serialise une instance ORM en dict JSON-friendly."""
     row: dict[str, Any] = {}
     for field in model._meta.concrete_fields:
+        if field.name == "password":
+            if _is_auth_user_model(model):
+                row["password_set"] = instance.has_usable_password()
+            continue
         row[field.name] = _serialize_value(getattr(instance, field.attname))
     return row
 
@@ -2111,9 +2297,66 @@ def list_model_rows(app_label: str, model_name: str, *, limit: int = 500) -> dic
     return {"results": rows, "count": model.objects.count(), "pk_field": model._meta.pk.name}
 
 
+def _create_auth_user(model: type[models.Model], payload: dict[str, Any]) -> dict[str, Any]:
+    """Cree un utilisateur Django avec mot de passe hashe."""
+    data = _clean_payload(model, payload, exclude_pk=True)
+    password = data.pop("password", None)
+    if not password:
+        raise ValueError("Champ requis : password")
+    username = data.get("username")
+    if not username:
+        raise ValueError("Champ requis : username")
+    m2m_skip = {"groups", "user_permissions"}
+    extra = {
+        key: value
+        for key, value in data.items()
+        if key not in {"username", "email", "password"} and key not in m2m_skip
+    }
+    try:
+        user = model.objects.create_user(
+            username=str(username),
+            email=str(data.get("email", "")),
+            password=str(password),
+            **extra,
+        )
+        user.full_clean()
+    except (ValidationError, IntegrityError) as exc:
+        raise ValueError(str(exc)) from exc
+    return serialize_instance(model, user)
+
+
+def _update_auth_user(
+    model: type[models.Model],
+    instance: models.Model,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Met a jour un utilisateur Django (hash du mot de passe si fourni)."""
+    raw = dict(payload)
+    password = raw.pop("password", None)
+    if password == "":
+        password = None
+    raw.pop("password_set", None)
+    data = _clean_payload(model, raw, exclude_pk=True)
+    m2m_skip = {"groups", "user_permissions"}
+    for name, value in data.items():
+        if name in m2m_skip:
+            continue
+        setattr(instance, name, value)
+    if password:
+        instance.set_password(str(password))
+    try:
+        instance.full_clean()
+        instance.save()
+    except (ValidationError, IntegrityError) as exc:
+        raise ValueError(str(exc)) from exc
+    return serialize_instance(model, instance)
+
+
 def create_model_row(app_label: str, model_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Cree une ligne via ORM (whitelist registry)."""
     model = _resolve_model(app_label, model_name)
+    if _is_auth_user_model(model):
+        return _create_auth_user(model, payload)
     data = _clean_payload(model, payload, exclude_pk=True)
     try:
         instance = model(**data)
@@ -2133,10 +2376,16 @@ def update_model_row(
     """Met a jour une ligne via ORM."""
     model = _resolve_model(app_label, model_name)
     instance = model.objects.get(pk=pk)
+    if _is_auth_user_model(model):
+        return _update_auth_user(model, instance, payload)
     data = _clean_payload(model, payload, exclude_pk=True)
     for name, value in data.items():
         setattr(instance, name, value)
-    instance.save()
+    try:
+        instance.full_clean()
+        instance.save()
+    except (ValidationError, IntegrityError) as exc:
+        raise ValueError(str(exc)) from exc
     return serialize_instance(model, instance)
 
 
@@ -2441,9 +2690,11 @@ from apps.admin_panel.registry import ADMIN_MODEL_REGISTRY
 from apps.admin_panel.selectors import list_registry_entries
 
 
-def test_registry_contains_transaction() -> None:
+def test_registry_contains_user() -> None:
     entries = list_registry_entries()
-    assert any(e["model_name"] == "transaction" for e in entries)
+    assert any(
+        e["app_label"] == "auth" and e["model_name"] == "user" for e in entries
+    )
 
 
 def test_registry_whitelist_not_empty() -> None:
@@ -2459,13 +2710,13 @@ from apps.admin_panel.selectors import export_schema_mermaid, get_model_schema
 
 
 @pytest.mark.django_db
-def test_model_schema_transaction_fields() -> None:
-    schema = get_model_schema("$AppName", "transaction")
+def test_model_schema_user_fields() -> None:
+    schema = get_model_schema("auth", "user")
     assert "relations" in schema
     assert "incoming" in schema
     names = {f["name"] for f in schema["fields"]}
-    assert "amount" in names
-    assert "label" in names
+    assert "username" in names
+    assert "email" in names
 
 
 def test_export_mermaid_contains_erdiagram() -> None:
@@ -2674,6 +2925,7 @@ function New-NextJsFrontend {
   "name": "$ProjectSlug-frontend",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0 -p 3000",
     "build": "next build",
@@ -2698,13 +2950,6 @@ function New-NextJsFrontend {
     "eslint-config-next": "^15.1.0",
     "sass": "^1.83.0",
     "typescript": "^5.7.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@parcel/watcher",
-      "sharp",
-      "unrs-resolver"
-    ]
   }
 }
 "@
@@ -2877,7 +3122,10 @@ export default function HomePage() {
 
     Write-TextFile -Path (Join-Path $fe ".env.example") -Content @"
 NEXT_PUBLIC_API_URL=http://localhost:8000
-# Docker dev (Server Components) - via port publie sur l'hote :
+# Server Components (fetch Django depuis le conteneur Next) :
+# Stack full Docker (defaut compose) :
+# API_INTERNAL_URL=http://web:8000
+# Hybride (Django sur l'hote, Next dans Docker) :
 # API_INTERNAL_URL=http://host.docker.internal:8000
 "@
 
@@ -2990,6 +3238,8 @@ exec uv run python manage.py runserver 0.0.0.0:8000
 set -e
 export CI=true
 cd /app
+corepack enable
+corepack prepare pnpm@9.15.9 --activate
 
 pnpm_install_safe() {
   if [ -f pnpm-lock.yaml ]; then
@@ -3013,10 +3263,36 @@ mkdir -p .next/cache .next/server .next/static
 exec pnpm dev
 '@
 
-    Write-TextFile -Path (Join-Path $feScriptsDir "docker-frontend-dev.sh") -Content @'
+    Write-TextFile -Path (Join-Path $feScriptsDir "pnpm-docker.sh") -Content @'
 #!/bin/sh
-# Alias - preferer scripts/docker-entrypoint-dev.sh
-exec /app/scripts/docker-entrypoint-dev.sh
+# Wrapper pnpm (shell interactif : docker compose exec frontend sh).
+set -e
+cd /app
+corepack enable
+corepack prepare pnpm@9.15.9 --activate
+exec pnpm "$@"
+'@
+
+    Write-TextFile -Path (Join-Path $scriptsDir "docker-web-prod.sh") -Content @'
+#!/bin/sh
+# Entree Docker prod backend : migrations puis Gunicorn.
+set -e
+cd /app
+attempt=0
+max=30
+while [ "$attempt" -lt "$max" ]; do
+  if getent hosts db >/dev/null 2>&1 && uv run python -c "import socket; s=socket.create_connection(('db',5432),3); s.close()"; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+if [ "$attempt" -ge "$max" ]; then
+  echo "ERREUR: PostgreSQL (db:5432) injoignable." >&2
+  exit 1
+fi
+uv run python manage.py migrate --noinput
+exec uv run gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2
 '@
 
     Write-TextFile -Path (Join-Path $Root "Dockerfile") -Content @'
@@ -3125,7 +3401,7 @@ services:
     environment:
       CI: "true"
       NEXT_PUBLIC_API_URL: http://localhost:8000
-      API_INTERNAL_URL: http://host.docker.internal:8000
+      API_INTERNAL_URL: ${API_INTERNAL_URL:-http://web:8000}
       HOSTNAME: "0.0.0.0"
     ports:
       - "3000:3000"
@@ -3147,7 +3423,6 @@ volumes:
 '@
 
     Write-TextFile -Path (Join-Path $Root "docker-compose.yml") -Content $composeDev
-    Write-TextFile -Path (Join-Path $Root "docker-compose.dev.yml") -Content $composeDev
 
     Write-TextFile -Path (Join-Path $Root "docker-compose.prod.yml") -Content @'
 services:
@@ -3165,6 +3440,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: prod
+    command: ["/bin/sh", "scripts/docker-web-prod.sh"]
     environment:
       DJANGO_ENV: prod
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?required}
@@ -3177,9 +3453,20 @@ services:
       DJANGO_DB_HOST: db
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://example.com}
     depends_on:
-      - db
+      db:
+        condition: service_started
     ports:
       - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "uv run python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/', timeout=3)\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
 
   frontend:
     build:
@@ -3188,10 +3475,15 @@ services:
       target: runner
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    environment:
+      API_INTERNAL_URL: http://web:8000
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
     ports:
       - "3000:3000"
     depends_on:
-      - web
+      web:
+        condition: service_healthy
 
 volumes:
   pgdata:
@@ -3341,18 +3633,18 @@ function New-CursorProjectRules {
 | ``frontend/`` | Next.js App Router + admin custom ``/admin`` |
 | ``apps/admin_panel/`` | Registry whitelist + API DRF ``/api/admin/`` |
 | ``tests/`` | Pytest |
-| ``docker-compose*.yml`` | Stack locale / prod |
+| ``docker-compose.yml`` / ``docker-compose.prod.yml`` | Dev local / prod |
 
 ## Apps Django
 | App | Role |
 |-----|------|
-| ``apps.$AppName`` | App metier (ex. Transaction) |
+| ``apps.$AppName`` | App metier (modeles custom ; User = ``auth.User``) |
 | ``apps.admin_panel`` | Admin custom : registry, schema, stubs CRUD API |
 
 ## Front Next.js
 - UI admin principale : ``/admin``, ``/login`` (Flat High-End, SCSS + ``:root``).
 - Pas de HTMX. Pas de logique metier cote client.
-- ``NEXT_PUBLIC_API_URL`` (navigateur) ; ``API_INTERNAL_URL`` (RSC Docker, ex. ``http://host.docker.internal:8000``).
+- ``NEXT_PUBLIC_API_URL`` (navigateur) ; ``API_INTERNAL_URL`` (RSC Docker, defaut ``http://web:8000``).
 "@
     Write-TextFile -Path (Join-Path $cursorDir "app-structure.md") -Content $structure
 
@@ -3368,7 +3660,9 @@ package "config" {
 package "apps" {
   package "$AppName" {
     [models]
-    [Transaction]
+  }
+  package "auth" {
+    [User]
   }
   package "admin_panel" {
     [registry]
@@ -3478,6 +3772,7 @@ db.sqlite3
 staticfiles/
 .env
 .env.local
+.migrate_bootstrap.py
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
@@ -3547,7 +3842,8 @@ Depannage :
 - ``web`` en ``Restarting`` : ``docker compose logs web`` (souvent PostgreSQL : ``failed to resolve host 'db'``).
 - Port 5432 deja utilise sous Windows : Postgres Docker mappe sur **5433** (hote) ; arreter un Postgres local ou changer le mapping.
 - ``authentification par mot de passe echouee`` pour ``app`` : le port 5433 n'est pas le bon Postgres, ou volume obsolete. ``docker compose down -v`` puis ``docker compose up -d db``. Mot de passe attendu : ``dev`` (voir ``.env`` et ``POSTGRES_PASSWORD`` dans compose).
-- ``fetch failed`` / ``ECONNREFUSED`` sur ``/admin`` : ``curl http://localhost:8000/api/health/`` ; sous Docker Desktop utiliser ``API_INTERNAL_URL=http://host.docker.internal:8000`` + ``extra_hosts: host-gateway``.
+- ``fetch failed`` / ``ECONNREFUSED`` sur ``/admin`` : ``curl http://localhost:8000/api/health/`` ; en full Docker ``API_INTERNAL_URL`` doit etre ``http://web:8000`` (defaut compose). Hybride (Django sur l'hote) : ``API_INTERNAL_URL=http://host.docker.internal:8000``.
+- ``ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF`` : pnpm 9.15.9 est impose (``packageManager`` + entrypoint). Ajout de paquet dans le conteneur : ``docker compose exec frontend sh scripts/pnpm-docker.sh add framer-motion`` (met a jour ``package.json`` + ``pnpm-lock.yaml`` sur l'hote).
 - ``app-paths-manifest.json`` ENOENT : supprimer ``frontend/.next`` sur l'hote, volume ``frontend_next`` dans compose, puis ``docker compose up --build``.
 - ``ERR_PNPM_NO_LOCKFILE`` : ``cd frontend && pnpm install`` (cree ``pnpm-lock.yaml``), puis ``docker compose build frontend``.
 - ``Cannot resolve lucide-react`` / prompt pnpm purge : ``docker compose down -v`` puis ``docker compose build frontend`` et ``docker compose up`` (volume ``node_modules`` vide ou Windows desync).
@@ -3577,7 +3873,7 @@ Cree a l'init ou via ``createsuperuser`` - **superuser** requis pour ``/login``.
 
 ## Backend
 
-App metier : ``apps.$AppName`` (ex. ``Transaction``)
+App metier : ``apps.$AppName`` ; admin DataStudio : ``auth.User`` par defaut
 Admin API : ``apps.admin_panel`` - registry whitelist, schema, stubs CRUD
 
 Django ``/django-admin/`` : fallback **dev uniquement** (``DJANGO_ADMIN_ENABLED``).
@@ -3653,9 +3949,10 @@ function Test-ProjectStructure {
         $required += @(
             "Dockerfile",
             "docker-compose.yml",
+            "docker-compose.prod.yml",
             "scripts\docker-web-dev.sh",
-            "frontend\scripts\docker-entrypoint-dev.sh",
-            "frontend\scripts\docker-frontend-dev.sh"
+            "scripts\docker-web-prod.sh",
+            "frontend\scripts\docker-entrypoint-dev.sh"
         )
     }
     foreach ($rel in $required) {
@@ -3666,34 +3963,106 @@ function Test-ProjectStructure {
     }
 }
 
+function Get-PnpmCliVersion {
+    param([Parameter(Mandatory)][string]$WorkingDirectory)
+
+    $pnpmPath = Resolve-NodeToolPath -Name "pnpm"
+    if (-not $pnpmPath) { return $null }
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $argString = "--version"
+        $ext = [System.IO.Path]::GetExtension($pnpmPath).ToLowerInvariant()
+        if (($IsWindows -or $env:OS -eq "Windows_NT") -and $ext -in @(".cmd", ".bat")) {
+            $psi.FileName = if ([string]::IsNullOrWhiteSpace($env:ComSpec)) { "cmd.exe" } else { $env:ComSpec }
+            $psi.Arguments = "/d /s /c `"`"$pnpmPath`" $argString`""
+        } else {
+            $psi.FileName = $pnpmPath
+            $psi.Arguments = $argString
+        }
+        $psi.WorkingDirectory = $WorkingDirectory
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $null = $p.WaitForExit(15000)
+        if ($p.ExitCode -ne 0) { return $null }
+        return ($p.StandardOutput.ReadToEnd().Trim())
+    } catch {
+        return $null
+    }
+}
+
+function Ensure-PnpmVersion {
+    param([Parameter(Mandatory)][string]$WorkingDirectory)
+
+    if ((Get-PnpmCliVersion -WorkingDirectory $WorkingDirectory) -eq "9.15.9") {
+        return $true
+    }
+
+    if (Resolve-NodeToolPath -Name "corepack") {
+        try {
+            Invoke-CheckedCommand -Exe "corepack" -Arguments @("prepare", "pnpm@9.15.9", "--activate") `
+                -WorkingDirectory $WorkingDirectory -Quiet -TimeoutSeconds 120
+            if ((Get-PnpmCliVersion -WorkingDirectory $WorkingDirectory) -eq "9.15.9") {
+                return $true
+            }
+        } catch {
+            Write-Host "     corepack prepare ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
+        }
+    }
+
+    if (Resolve-NodeToolPath -Name "npm") {
+        try {
+            Invoke-CheckedCommand -Exe "npm" -Arguments @("install", "-g", "pnpm@9.15.9") `
+                -WorkingDirectory $WorkingDirectory -Quiet -TimeoutSeconds 180
+            if ((Get-PnpmCliVersion -WorkingDirectory $WorkingDirectory) -eq "9.15.9") {
+                return $true
+            }
+        } catch {
+            Write-Host "     npm install -g pnpm ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
+        }
+    }
+
+    return $false
+}
+
 function Install-FrontendDependencies {
     param([Parameter(Mandatory)][string]$FrontendRoot)
 
     $lockPath = Join-Path $FrontendRoot "pnpm-lock.yaml"
-    $installArgs = if (Test-Path -LiteralPath $lockPath) {
+    $pnpmArgs = if (Test-Path -LiteralPath $lockPath) {
         @("install", "--frozen-lockfile")
     } else {
         @("install")
     }
 
-    foreach ($tool in @("pnpm", "npm")) {
-        if (-not (Resolve-ExecutablePath -Name $tool)) { continue }
+    $null = Ensure-PnpmVersion -WorkingDirectory $FrontendRoot
+
+    if (Resolve-NodeToolPath -Name "pnpm") {
         try {
-            if ($tool -eq "npm") {
-                $installArgs = @("install")
-            }
-            Write-Host "     $tool $($installArgs -join ' ') (genere pnpm-lock.yaml pour Docker rapide)..." -ForegroundColor DarkGray
-            Invoke-CheckedCommand -Exe $tool -Arguments $installArgs -WorkingDirectory $FrontendRoot `
-                -Quiet -TimeoutSeconds $CommandTimeoutSeconds
-            if ($tool -eq "pnpm" -and -not (Test-Path -LiteralPath $lockPath)) {
+            Write-Host "     pnpm $($pnpmArgs -join ' ') (pnpm 9.15.9, genere pnpm-lock.yaml)..." -ForegroundColor DarkGray
+            Invoke-NativeCli -Exe "pnpm" -Arguments $pnpmArgs -WorkingDirectory $FrontendRoot -Quiet
+            if (-not (Test-Path -LiteralPath $lockPath)) {
                 Write-Host "     Avertissement : pnpm-lock.yaml absent apres install." -ForegroundColor DarkYellow
             }
-            return $tool
+            return "pnpm"
         } catch {
-            Write-Host "     $tool install ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
+            Write-Host "     pnpm install ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
         }
     }
-    Write-Host "     Installez les deps : cd frontend && pnpm install" -ForegroundColor DarkYellow
+
+    if (Resolve-NodeToolPath -Name "npm") {
+        try {
+            Write-Host "     npm install (fallback sans pnpm-lock.yaml)..." -ForegroundColor DarkYellow
+            Invoke-NativeCli -Exe "npm" -Arguments @("install") -WorkingDirectory $FrontendRoot -Quiet
+            return "npm"
+        } catch {
+            Write-Host "     npm install ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
+        }
+    }
+
+    Write-Host "     Installez les deps : cd frontend && pnpm install (ou laissez Docker builder l'image frontend)." -ForegroundColor DarkYellow
     return $null
 }
 
@@ -3957,13 +4326,18 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
         } else {
             "SQLite"
         }
-        Write-Host "     makemigrations + migrate ($dbLabel)" -ForegroundColor DarkGray
+        $needsMakemigrations = Test-AppDefinesModels -Root $root -AppName $AppName
+        if ($needsMakemigrations) {
+            Write-Host "     makemigrations $AppName + migrate ($dbLabel)" -ForegroundColor DarkGray
+        } else {
+            Write-Host "     migrate uniquement ($dbLabel) - auth/admin Django, pas de modeles $AppName" -ForegroundColor DarkGray
+        }
         if (Test-ProjectDotEnvUsesPostgres -Root $root) {
             if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
                 throw "Docker requis pour PostgreSQL (.env) : installez Docker Desktop"
             }
             try {
-                Ensure-ComposeDatabaseForDjango -Root $root -TimeoutSeconds 60
+                Ensure-ComposeDatabaseForDjango -Root $root -TimeoutSeconds 30
             } catch {
                 throw @"
 PostgreSQL indisponible pour les migrations : $($_.Exception.Message)
@@ -3971,8 +4345,7 @@ Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v &&
 "@
             }
         }
-        Invoke-DjangoManage -Root $root -Arguments @("makemigrations", $AppName, "--noinput")
-        Invoke-DjangoManage -Root $root -Arguments @("migrate", "--noinput", "--verbosity", "1")
+        Invoke-DjangoMigrationBootstrap -Root $root -AppName $AppName -RunMakemigrations:$needsMakemigrations
         Complete-PipelineStep -Message "migrations appliquees"
     }
 

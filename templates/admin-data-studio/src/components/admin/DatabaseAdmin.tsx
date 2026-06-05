@@ -25,9 +25,10 @@ import {
 import type { GlobalSchema, ModelSchema } from "@/lib/schema-types";
 import type { RegistryEntry } from "@/lib/admin-api-types";
 import { buildStudioTables } from "@/lib/admin-studio-adapter";
-import type { StudioTable, StudioView } from "@/lib/admin-studio-types";
+import type { StudioMode, StudioTable, StudioView } from "@/lib/admin-studio-types";
 import { AdminDataTable } from "@/components/admin/AdminDataTable";
 import { AdminERDiagram } from "@/components/admin/AdminERDiagram";
+import { AdminQueryPanel } from "@/components/admin/AdminQueryPanel";
 import { AdminTableDetails } from "@/components/admin/AdminTableDetails";
 
 type DatabaseAdminProps = {
@@ -51,9 +52,13 @@ export function DatabaseAdmin({
     [registry, schemas],
   );
 
+  const initialMode = (searchParams.get("mode") as StudioMode) || "explorer";
   const initialTableId = searchParams.get("table") ?? tables[0]?.id ?? null;
   const initialView = (searchParams.get("view") as StudioView) || "data";
 
+  const [studioMode, setStudioMode] = useState<StudioMode>(
+    initialMode === "query" ? "query" : "explorer",
+  );
   const [selectedId, setSelectedId] = useState<string | null>(initialTableId);
   const [activeView, setActiveView] = useState<StudioView>(
     ["data", "structure", "diagram"].includes(initialView) ? initialView : "data",
@@ -78,13 +83,22 @@ export function DatabaseAdmin({
   const selectedTable = tables.find((t) => t.id === selectedId) ?? null;
 
   const syncUrl = useCallback(
-    (tableId: string | null, view: StudioView) => {
+    (tableId: string | null, view: StudioView, mode: StudioMode = studioMode) => {
       const params = new URLSearchParams();
+      params.set("mode", mode);
       if (tableId) params.set("table", tableId);
       params.set("view", view);
       router.replace(`/admin?${params.toString()}`, { scroll: false });
     },
-    [router],
+    [router, studioMode],
+  );
+
+  const switchMode = useCallback(
+    (mode: StudioMode) => {
+      setStudioMode(mode);
+      syncUrl(selectedId, activeView, mode);
+    },
+    [activeView, selectedId, syncUrl],
   );
 
   const selectTable = useCallback(
@@ -141,15 +155,27 @@ export function DatabaseAdmin({
           <span>DataStudio</span>
         </div>
         <div className="data-studio__nav">
-          <button type="button" className="data-studio__nav-btn">
+          <button
+            type="button"
+            className={`data-studio__nav-btn${
+              studioMode === "explorer" ? " data-studio__nav-btn--active" : ""
+            }`}
+            onClick={() => switchMode("explorer")}
+          >
             <FolderOpen size={16} />
             Explorer
           </button>
-          <button type="button" className="data-studio__nav-btn">
+          <button
+            type="button"
+            className={`data-studio__nav-btn${
+              studioMode === "query" ? " data-studio__nav-btn--active" : ""
+            }`}
+            onClick={() => switchMode("query")}
+          >
             <Terminal size={16} />
             Query
           </button>
-          <button type="button" className="data-studio__nav-btn">
+          <button type="button" className="data-studio__nav-btn" disabled title="Bientot disponible">
             <History size={16} />
             History
           </button>
@@ -236,7 +262,9 @@ export function DatabaseAdmin({
 
           <Panel defaultSize={55} minSize={35}>
             <div className="data-studio__center">
-              {selectedTable ? (
+              {studioMode === "query" ? (
+                <AdminQueryPanel tables={tables} />
+              ) : selectedTable ? (
                 <>
                   <div className="data-studio__table-header">
                     <div>
@@ -309,7 +337,15 @@ export function DatabaseAdmin({
           <PanelResizeHandle />
 
           <Panel defaultSize={25} minSize={15} maxSize={40} collapsible>
-            {selectedTable && activeView === "data" ? (
+            {studioMode === "query" ? (
+              <div className="data-studio__empty" style={{ borderLeft: "1px solid var(--ds-border)" }}>
+                <Terminal size={32} opacity={0.35} />
+                <p style={{ fontSize: "0.875rem" }}>Mode Query actif</p>
+                <p className="shell__muted" style={{ fontSize: "0.75rem", textAlign: "center", padding: "0 1rem" }}>
+                  Seules les requetes SELECT sont autorisees. Limite 500 lignes, timeout 5 s.
+                </p>
+              </div>
+            ) : selectedTable && activeView === "data" ? (
               <div style={{ height: "100%", borderLeft: "1px solid var(--ds-border)", background: "var(--ds-card)" }}>
                 <div style={{ padding: "0.75rem", borderBottom: "1px solid var(--ds-border)", fontWeight: 600, fontSize: "0.875rem" }}>
                   Quick Info

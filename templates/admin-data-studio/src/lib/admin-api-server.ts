@@ -37,12 +37,22 @@ async function fetchApi(path: string, init?: RequestInit): Promise<Response> {
   throw lastError;
 }
 
+export class AdminApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "AdminApiError";
+    this.status = status;
+  }
+}
+
 async function assertOk(res: Response, label: string): Promise<Response> {
   if (res.ok) {
     return res;
   }
   const body = (await res.text().catch(() => "")).slice(0, 300);
-  throw new Error(`${label} failed: HTTP ${res.status} ${body}`);
+  throw new AdminApiError(`${label} failed: HTTP ${res.status} ${body}`, res.status);
 }
 
 export type { ModelRowsResponse, RegistryEntry };

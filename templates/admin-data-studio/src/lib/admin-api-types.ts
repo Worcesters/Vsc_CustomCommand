@@ -10,3 +10,13 @@ export type ModelRowsResponse = {
   count: number;
   pk_field?: string;
 };
+
+export type QueryResultRow = Record<string, string | number | boolean | null>;
+
+export type QueryExecuteResponse = {
+  columns: string[];
+  rows: QueryResultRow[];
+  row_count: number;
+  truncated: boolean;
+  elapsed_ms: number;
+};

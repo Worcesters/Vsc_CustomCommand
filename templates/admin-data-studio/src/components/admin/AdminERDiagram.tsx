@@ -4,10 +4,8 @@ import { useCallback, useMemo, useRef } from "react";
 import {
   Background,
   Controls,
-  Handle,
   MarkerType,
   MiniMap,
-  Position,
   ReactFlow,
   ReactFlowProvider,
   type Edge,
@@ -35,8 +33,9 @@ function ErTableNode({ data }: NodeProps<Node<ErNodeData>>) {
   const { table, colorIndex, isSelected } = data;
   const headClass = `ds-er-node__head ds-er-node__head--c${colorIndex % 3}`;
   return (
-    <div className={`ds-er-node${isSelected ? " ds-er-node--selected" : ""}`}>
-      <Handle type="target" position={Position.Left} isConnectable={false} />
+    <div
+      className={`ds-er-node nopan${isSelected ? " ds-er-node--selected" : ""}`}
+    >
       <div className={headClass}>
         <span>{table.name}</span>
         <span style={{ float: "right", opacity: 0.85, fontSize: "0.75rem" }}>
@@ -58,7 +57,6 @@ function ErTableNode({ data }: NodeProps<Node<ErNodeData>>) {
           </div>
         ) : null}
       </div>
-      <Handle type="source" position={Position.Right} isConnectable={false} />
     </div>
   );
 }
@@ -105,6 +103,8 @@ function AdminERDiagramInner({
       id: table.id,
       type: "erTable",
       position: { x: 0, y: 0 },
+      dragHandle: ".ds-er-node",
+      style: { width: NODE_W },
       data: {
         table,
         colorIndex: i,
@@ -185,6 +185,8 @@ function AdminERDiagramInner({
           nodesConnectable={false}
           elementsSelectable
           selectNodesOnDrag={false}
+          panOnDrag
+          panOnScroll
           fitView
           minZoom={0.25}
           maxZoom={1.5}

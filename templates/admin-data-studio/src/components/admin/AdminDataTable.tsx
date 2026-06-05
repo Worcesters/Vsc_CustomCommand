@@ -20,12 +20,22 @@ import {
   Trash2,
 } from "lucide-react";
 import {
+  AdminApiClientError,
   createModelRow,
   deleteModelRow,
   fetchModelRows,
   updateModelRow,
 } from "@/lib/admin-api-client";
 import { RowFormDialog } from "@/components/admin/RowFormDialog";
+import {
+  type FieldErrors,
+  validateStudioForm,
+} from "@/lib/form-validation";
+import {
+  formatGridCellValue,
+  prepareEditRow,
+  prepareSubmitPayload,
+} from "@/lib/row-display";
 import type { StudioRow, StudioTable } from "@/lib/admin-studio-types";
 
 type AdminDataTableProps = {
@@ -78,6 +88,9 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [activeRow, setActiveRow] = useState<StudioRow | null>(null);
   const [formData, setFormData] = useState<StudioRow>({});
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [formError, setFormError] = useState("");
+  const [deleteError, setDeleteError] = useState("");
 
   const onRowCountRef = useRef(onRowCount);
   useEffect(() => {
@@ -149,13 +162,33 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
   const openCreate = () => {
     setFormData(emptyRow(table));
     setActiveRow(null);
+    setFieldErrors({});
+    setFormError("");
     setFormOpen("create");
   };
 
   const openEdit = (row: StudioRow) => {
     setActiveRow(row);
-    setFormData({ ...row });
+    setFormData(prepareEditRow(row));
+    setFieldErrors({});
+    setFormError("");
     setFormOpen("edit");
+  };
+
+  const handleFormChange = (data: StudioRow) => {
+    setFormData(data);
+    setFieldErrors((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(data)) {
+        if (next[key] && data[key] != null && data[key] !== "") {
+          delete next[key];
+        }
+      }
+      return next;
+    });
+    if (formError) {
+      setFormError("");
+    }
   };
 
   const openDelete = (row: StudioRow) => {
@@ -164,30 +197,34 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
   };
 
   const submitForm = async () => {
-    const missing = table.columns.filter(
-      (col) =>
-        col.editable !== false &&
-        !col.primaryKey &&
-        !col.nullable &&
-        (formData[col.name] == null || formData[col.name] === ""),
-    );
-    if (missing.length > 0) {
-      alert(`Champs requis : ${missing.map((c) => c.name).join(", ")}`);
+    const mode = formOpen === "create" ? "create" : "edit";
+    const clientErrors = validateStudioForm(table.columns, formData, mode);
+    if (Object.keys(clientErrors).length > 0) {
+      setFieldErrors(clientErrors);
+      setFormError("Corrigez les champs en rouge avant d'enregistrer.");
       return;
     }
+    setFieldErrors({});
+    setFormError("");
+    const payload = prepareSubmitPayload(formData, mode);
     setSaving(true);
     try {
       if (formOpen === "create") {
-        await createModelRow(table.appLabel, table.modelName, formData);
+        await createModelRow(table.appLabel, table.modelName, payload);
       } else if (formOpen === "edit" && activeRow) {
         const pk = activeRow[pkField];
         if (pk == null) throw new Error("PK manquante");
-        await updateModelRow(table.appLabel, table.modelName, String(pk), formData);
+        await updateModelRow(table.appLabel, table.modelName, String(pk), payload);
       }
       setFormOpen(null);
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Erreur enregistrement");
+      if (err instanceof AdminApiClientError) {
+        setFieldErrors(err.fields);
+        setFormError(err.message);
+        return;
+      }
+      setFormError(err instanceof Error ? err.message : "Erreur enregistrement");
     } finally {
       setSaving(false);
     }
@@ -197,13 +234,20 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
     if (!activeRow) return;
     const pk = activeRow[pkField];
     if (pk == null) return;
+    setDeleteError("");
     setSaving(true);
     try {
       await deleteModelRow(table.appLabel, table.modelName, String(pk));
       setDeleteOpen(false);
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Erreur suppression");
+      setDeleteError(
+        err instanceof AdminApiClientError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Erreur suppression",
+      );
     } finally {
       setSaving(false);
     }
@@ -224,7 +268,13 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
       setSelected(new Set());
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Erreur suppression");
+      setFormError(
+        err instanceof AdminApiClientError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Erreur suppression",
+      );
     } finally {
       setSaving(false);
     }
@@ -332,18 +382,25 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
                       {table.columns.map((col) => {
                         const val = row[col.name];
                         const cellKey = `${gi}-${col.name}`;
+                        const display = formatGridCellValue(col, row);
+                        const isNull = display === "NULL";
+                        const isMaskedPassword = col.name === "password" && !isNull;
                         return (
                           <td
                             key={col.name}
                             onDoubleClick={() => void copyCell(cellKey, val)}
                             title="Double-clic pour copier"
                           >
-                            {val == null ? (
+                            {isNull ? (
                               <span className="ds-null">NULL</span>
+                            ) : isMaskedPassword ? (
+                              <span className="ds-password-mask" title="Mot de passe defini (non affiche)">
+                                {display}
+                              </span>
                             ) : typeof val === "boolean" ? (
                               <span className="schema-relations__badge">{String(val)}</span>
                             ) : (
-                              String(val).slice(0, 80)
+                              display
                             )}
                             {copied === cellKey ? <Check size={12} style={{ marginLeft: 4 }} /> : null}
                           </td>
@@ -396,8 +453,10 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
         mode={formOpen === "create" ? "create" : "edit"}
         open={formOpen !== null}
         saving={saving}
+        fieldErrors={fieldErrors}
+        formError={formError}
         onClose={() => setFormOpen(null)}
-        onChange={setFormData}
+        onChange={handleFormChange}
         onSubmit={() => void submitForm()}
       />
 
@@ -411,6 +470,15 @@ export function AdminDataTable({ table, onRowCount }: AdminDataTableProps) {
             <p className="shell__muted" style={{ padding: "0 1rem 1rem" }}>
               Action irreversible sur {table.schema}.{table.name}.
             </p>
+            {deleteError ? (
+              <div
+                className="ds-modal__banner ds-modal__banner--error"
+                role="alert"
+                style={{ margin: "0 1rem 1rem" }}
+              >
+                {deleteError}
+              </div>
+            ) : null}
             <footer className="ds-modal__footer">
               <button type="button" className="ds-btn ds-btn--ghost" onClick={() => setDeleteOpen(false)}>
                 Annuler

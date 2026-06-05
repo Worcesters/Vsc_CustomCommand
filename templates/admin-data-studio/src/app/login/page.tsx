@@ -7,6 +7,7 @@ import { FormEvent, useState } from "react";
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const sessionExpired = searchParams.get("reason") === "session_expired";
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -58,6 +59,12 @@ export default function LoginPage() {
             Retour accueil
           </Link>
         </p>
+        {sessionExpired ? (
+          <p className="page-auth__error" role="status">
+            Session expiree ou base reinitialisee. Reconnectez-vous avec un superuser
+            Django.
+          </p>
+        ) : null}
         <form className="page-auth__form" onSubmit={onSubmit}>
           <label className="page-auth__label" htmlFor="username">
             Identifiant

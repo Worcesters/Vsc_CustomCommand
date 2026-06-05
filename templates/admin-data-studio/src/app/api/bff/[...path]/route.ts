@@ -19,7 +19,9 @@ async function proxyToDjango(
   }
 
   const path = pathSegments.join("/");
-  const url = `${getDjangoBase()}/${path}${request.nextUrl.search}`;
+  // Next.js normalise les URLs et retire le slash final ; Django APPEND_SLASH l'exige sur POST/PATCH.
+  const djangoPath = path.endsWith("/") ? path : `${path}/`;
+  const url = `${getDjangoBase()}/${djangoPath}${request.nextUrl.search}`;
   const headers = new Headers();
   headers.set("Authorization", `Bearer ${token}`);
   const contentType = request.headers.get("content-type");

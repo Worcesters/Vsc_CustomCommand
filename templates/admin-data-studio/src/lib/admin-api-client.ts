@@ -1,7 +1,14 @@
 /**
  * Appels API admin cote navigateur via le BFF `/api/bff` (pas de next/headers).
  */
-import type { ModelRowsResponse, RegistryEntry } from "@/lib/admin-api-types";
+import { throwAdminApiError } from "@/lib/admin-api-errors";
+import type {
+  ModelRowsResponse,
+  QueryExecuteResponse,
+  RegistryEntry,
+} from "@/lib/admin-api-types";
+
+export { AdminApiClientError } from "@/lib/admin-api-errors";
 
 async function fetchApi(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`/api/bff${path}`, {
@@ -15,11 +22,10 @@ async function assertOk(res: Response, label: string): Promise<Response> {
   if (res.ok) {
     return res;
   }
-  const body = (await res.text().catch(() => "")).slice(0, 300);
-  throw new Error(`${label} failed: HTTP ${res.status} ${body}`);
+  await throwAdminApiError(res, label);
 }
 
-export type { ModelRowsResponse, RegistryEntry };
+export type { ModelRowsResponse, QueryExecuteResponse, RegistryEntry };
 
 export async function fetchModelRows(
   app: string,
@@ -74,9 +80,20 @@ export async function deleteModelRow(
     method: "DELETE",
   });
   if (!res.ok && res.status !== 204) {
-    const body = (await res.text().catch(() => "")).slice(0, 300);
-    throw new Error(`model row delete failed: HTTP ${res.status} ${body}`);
+    await throwAdminApiError(res, "model row delete");
   }
+}
+
+export async function executeQuery(sql: string): Promise<QueryExecuteResponse> {
+  const res = await assertOk(
+    await fetchApi("/api/admin/query/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sql }),
+    }),
+    "query execute",
+  );
+  return res.json();
 }
 
 export async function fetchSchemaExport(): Promise<{ markdown: string }> {

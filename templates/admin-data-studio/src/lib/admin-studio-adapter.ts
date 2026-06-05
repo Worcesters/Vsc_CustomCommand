@@ -32,12 +32,23 @@ export function buildStudioTables(
     const id = `${entry.app_label}.${entry.model_name}`;
     const schema = byId.get(id);
     const columns: StudioColumn[] = (schema?.fields ?? []).map((field) => {
+      const isAutoPk =
+        field.type === "AutoField" || field.type === "BigAutoField";
       const col: StudioColumn = {
         name: field.name,
         type: djangoTypeToSql(field.type),
-        nullable: Boolean(field.nullable || field.blank),
-        primaryKey: field.type === "AutoField" || field.type === "BigAutoField",
+        nullable: Boolean(field.nullable),
+        blank: Boolean(field.blank),
+        primaryKey: Boolean(field.primary_key) || isAutoPk,
+        autoIncrement: Boolean(field.auto_increment) || isAutoPk,
         editable: field.editable !== false,
+        requiredOnCreate: Boolean(field.required_on_create),
+        required:
+          Boolean(field.required_on_create) ||
+          (!field.blank &&
+            field.editable !== false &&
+            !field.primary_key &&
+            !field.auto_increment),
       };
       if (field.default != null && field.default !== "") {
         col.defaultValue = field.default as string | number | boolean;
