@@ -596,54 +596,47 @@ function Test-PythonIdentifier {
 function Get-BrandCharteTokensScss {
     @'
 :root {
-  --color-bg: #f8fafc;
-  --color-text: #0f172a;
-  --color-text-muted: #64748b;
-  --color-border: #e2e8f0;
-  --color-surface: #ffffff;
+  --color-bg: #080808;
+  --color-text: #f5efe3;
+  --color-text-muted: #a89a72;
+  --color-border: #2e2a1c;
+  --color-surface: #11100c;
 
-  --primary-color: #45cdf7;
-  --primary-color-hover: #2ebde9;
-  --primary-color-active: #1aadc9;
-  --primary-color-on: #0f172a;
+  --primary-color: #b8860b;
+  --primary-color-hover: #d4af37;
+  --primary-color-active: #96700a;
+  --primary-color-on: #080808;
 
-  --secondary-color: #4574f7;
-  --secondary-color-hover: #3358c4;
-  --secondary-color-active: #2845a8;
-  --secondary-color-on: #ffffff;
+  --secondary-color: #1a1812;
+  --secondary-color-hover: #262218;
+  --secondary-color-active: #12100c;
+  --secondary-color-on: #d4af37;
 
-  --tertiary-color: #4574f7;
-  --tertiary-color-hover: #3358c4;
-  --tertiary-color-active: #2845a8;
-  --tertiary-color-on: #ffffff;
+  --tertiary-color: #c9a227;
+  --tertiary-color-hover: #e0bc42;
+  --tertiary-color-active: #a68518;
+  --tertiary-color-on: #080808;
 
-  --accent-color: var(--tertiary-color);
-  --accent-color-hover: var(--tertiary-color-hover);
-  --accent-color-active: var(--tertiary-color-active);
-  --accent-color-on: var(--tertiary-color-on);
+  --accent-color: #e8c547;
+  --accent-color-hover: #f2d96a;
+  --accent-color-active: #c9a227;
+  --accent-color-on: #080808;
 
-  --success-color: #16a34a;
-  --warning-color: #ca8a04;
-  --danger-color: #dc2626;
-  --info-color: #45cdf7;
+  --success-color: #6b8f3c;
+  --warning-color: #c9a227;
+  --danger-color: #c45c4a;
+  --info-color: #d4af37;
 
-  --focus-ring: 0 0 0 2px #45cdf7;
+  --focus-ring: 0 0 0 2px color-mix(in srgb, var(--primary-color) 55%, transparent);
+  --glow-gold: 0 0 24px color-mix(in srgb, var(--primary-color) 35%, transparent);
   --space-2: 0.5rem;
   --space-3: 0.75rem;
   --space-4: 1rem;
   --space-6: 1.5rem;
   --space-8: 2rem;
   --radius-md: 0.375rem;
-  --radius-lg: 0.5rem;
+  --radius-lg: 0.75rem;
   --font-sans: "Inter", "Geist", system-ui, sans-serif;
-}
-
-[data-theme="dark"] {
-  --color-bg: #0f172a;
-  --color-text: #f8fafc;
-  --color-text-muted: #94a3b8;
-  --color-border: #334155;
-  --color-surface: #1e293b;
 }
 '@
 }
@@ -663,21 +656,32 @@ function Get-BrandButtonsScss {
 }
 
 .btn--primary {
-  background: var(--primary-color);
+  background: linear-gradient(
+    135deg,
+    var(--primary-color),
+    var(--tertiary-color)
+  );
   color: var(--primary-color-on);
+  box-shadow: var(--glow-gold);
 }
 
 .btn--primary:hover {
-  background: var(--primary-color-hover);
+  background: linear-gradient(
+    135deg,
+    var(--primary-color-hover),
+    var(--accent-color)
+  );
 }
 
 .btn--secondary {
-  background: var(--secondary-color);
-  color: var(--secondary-color-on);
+  background: transparent;
+  color: var(--accent-color);
+  border-color: color-mix(in srgb, var(--primary-color) 45%, var(--color-border));
 }
 
 .btn--secondary:hover {
-  background: var(--secondary-color-hover);
+  background: color-mix(in srgb, var(--primary-color) 12%, var(--color-surface));
+  border-color: var(--primary-color-hover);
 }
 
 .btn--tertiary {
@@ -693,13 +697,16 @@ function Get-BrandButtonsScss {
 
 function Get-BrandHomePageScss {
     @'
-.page-home {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-8);
-  padding: var(--space-8) var(--space-4);
-  max-width: 64rem;
-  margin: 0 auto;
+@keyframes brand-rise {
+  from {
+    opacity: 0;
+    transform: translateY(1.25rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .page-home__hero {
@@ -2753,6 +2760,15 @@ body {
   background: var(--color-bg);
   color: var(--color-text);
 }
+
+code {
+  padding: 0.125rem 0.375rem;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 35%, var(--color-border));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--color-surface));
+  color: var(--accent-color);
+  font-size: 0.875em;
+}
 '@
 
     Write-TextFile -Path (Join-Path $appDir "layout.tsx") -Content @'
@@ -2785,36 +2801,48 @@ const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 export default function HomePage() {
   return (
     <main className="page-home">
-      <header className="page-home__hero">
-        <p className="page-home__eyebrow">Django + uv + Next.js</p>
-        <h1 className="page-home__title">Bienvenue sur votre application</h1>
-        <p className="page-home__lead">
-          UI produit et administration custom. API metier :{" "}
-          <code>{apiUrl}</code>
-        </p>
-        <div className="page-home__actions">
-          <Link href="/admin" className="btn btn--primary">
-            Administration
-          </Link>
-          <Link href="/login" className="btn btn--secondary">
-            Connexion
-          </Link>
-        </div>
-      </header>
-      <section className="page-home__grid">
-        <article className="page-home__card">
-          <h2 className="page-home__card-title">API Django</h2>
-          <p className="page-home__card-text">
-            Service Layer, DRF et persistance via migrations ORM.
+      <div className="page-home__bg" aria-hidden="true">
+        <span className="page-home__orb page-home__orb--1" />
+        <span className="page-home__orb page-home__orb--2" />
+      </div>
+      <div className="page-home__inner">
+        <header className="page-home__hero">
+          <p className="page-home__eyebrow">Django Â· uv Â· Next.js</p>
+          <h1 className="page-home__title">Votre stack, en or et noir</h1>
+          <p className="page-home__lead">
+            Interface produit et DataStudio admin. API metier :{" "}
+            <code>{apiUrl}</code>
           </p>
-        </article>
-        <article className="page-home__card">
-          <h2 className="page-home__card-title">Admin Next.js</h2>
-          <p className="page-home__card-text">
-            Registry, schema des tables et CRUD (roadmap V1-V3).
-          </p>
-        </article>
-      </section>
+          <div className="page-home__actions">
+            <Link href="/admin" className="btn btn--primary">
+              Administration
+            </Link>
+            <Link href="/login" className="btn btn--secondary">
+              Connexion
+            </Link>
+          </div>
+        </header>
+        <section className="page-home__grid">
+          <article className="page-home__card">
+            <h2 className="page-home__card-title">API Django</h2>
+            <p className="page-home__card-text">
+              Service Layer, DRF et persistance PostgreSQL.
+            </p>
+          </article>
+          <article className="page-home__card">
+            <h2 className="page-home__card-title">DataStudio</h2>
+            <p className="page-home__card-text">
+              Schema, relations FK et CRUD sur vos modeles.
+            </p>
+          </article>
+          <article className="page-home__card">
+            <h2 className="page-home__card-title">Docker</h2>
+            <p className="page-home__card-text">
+              Stack locale compose : backend, frontend et base.
+            </p>
+          </article>
+        </section>
+      </div>
     </main>
   );
 }

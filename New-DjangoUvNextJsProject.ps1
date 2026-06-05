@@ -596,54 +596,47 @@ function Test-PythonIdentifier {
 function Get-BrandCharteTokensScss {
     @'
 :root {
-  --color-bg: #f8fafc;
-  --color-text: #0f172a;
-  --color-text-muted: #64748b;
-  --color-border: #e2e8f0;
-  --color-surface: #ffffff;
+  --color-bg: #080808;
+  --color-text: #f5efe3;
+  --color-text-muted: #a89a72;
+  --color-border: #2e2a1c;
+  --color-surface: #11100c;
 
-  --primary-color: #45cdf7;
-  --primary-color-hover: #2ebde9;
-  --primary-color-active: #1aadc9;
-  --primary-color-on: #0f172a;
+  --primary-color: #b8860b;
+  --primary-color-hover: #d4af37;
+  --primary-color-active: #96700a;
+  --primary-color-on: #080808;
 
-  --secondary-color: #4574f7;
-  --secondary-color-hover: #3358c4;
-  --secondary-color-active: #2845a8;
-  --secondary-color-on: #ffffff;
+  --secondary-color: #1a1812;
+  --secondary-color-hover: #262218;
+  --secondary-color-active: #12100c;
+  --secondary-color-on: #d4af37;
 
-  --tertiary-color: #4574f7;
-  --tertiary-color-hover: #3358c4;
-  --tertiary-color-active: #2845a8;
-  --tertiary-color-on: #ffffff;
+  --tertiary-color: #c9a227;
+  --tertiary-color-hover: #e0bc42;
+  --tertiary-color-active: #a68518;
+  --tertiary-color-on: #080808;
 
-  --accent-color: var(--tertiary-color);
-  --accent-color-hover: var(--tertiary-color-hover);
-  --accent-color-active: var(--tertiary-color-active);
-  --accent-color-on: var(--tertiary-color-on);
+  --accent-color: #e8c547;
+  --accent-color-hover: #f2d96a;
+  --accent-color-active: #c9a227;
+  --accent-color-on: #080808;
 
-  --success-color: #16a34a;
-  --warning-color: #ca8a04;
-  --danger-color: #dc2626;
-  --info-color: #45cdf7;
+  --success-color: #6b8f3c;
+  --warning-color: #c9a227;
+  --danger-color: #c45c4a;
+  --info-color: #d4af37;
 
-  --focus-ring: 0 0 0 2px #45cdf7;
+  --focus-ring: 0 0 0 2px color-mix(in srgb, var(--primary-color) 55%, transparent);
+  --glow-gold: 0 0 24px color-mix(in srgb, var(--primary-color) 35%, transparent);
   --space-2: 0.5rem;
   --space-3: 0.75rem;
   --space-4: 1rem;
   --space-6: 1.5rem;
   --space-8: 2rem;
   --radius-md: 0.375rem;
-  --radius-lg: 0.5rem;
+  --radius-lg: 0.75rem;
   --font-sans: "Inter", "Geist", system-ui, sans-serif;
-}
-
-[data-theme="dark"] {
-  --color-bg: #0f172a;
-  --color-text: #f8fafc;
-  --color-text-muted: #94a3b8;
-  --color-border: #334155;
-  --color-surface: #1e293b;
 }
 '@
 }
@@ -663,21 +656,32 @@ function Get-BrandButtonsScss {
 }
 
 .btn--primary {
-  background: var(--primary-color);
+  background: linear-gradient(
+    135deg,
+    var(--primary-color),
+    var(--tertiary-color)
+  );
   color: var(--primary-color-on);
+  box-shadow: var(--glow-gold);
 }
 
 .btn--primary:hover {
-  background: var(--primary-color-hover);
+  background: linear-gradient(
+    135deg,
+    var(--primary-color-hover),
+    var(--accent-color)
+  );
 }
 
 .btn--secondary {
-  background: var(--secondary-color);
-  color: var(--secondary-color-on);
+  background: transparent;
+  color: var(--accent-color);
+  border-color: color-mix(in srgb, var(--primary-color) 45%, var(--color-border));
 }
 
 .btn--secondary:hover {
-  background: var(--secondary-color-hover);
+  background: color-mix(in srgb, var(--primary-color) 12%, var(--color-surface));
+  border-color: var(--primary-color-hover);
 }
 
 .btn--tertiary {
@@ -693,7 +697,103 @@ function Get-BrandButtonsScss {
 
 function Get-BrandHomePageScss {
     @'
+@keyframes brand-rise {
+  from {
+    opacity: 0;
+    transform: translateY(1.25rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes brand-float {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+
+  50% {
+    transform: translate(0.75rem, -1rem) scale(1.05);
+  }
+}
+
+@keyframes brand-shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+@keyframes brand-glow-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+
+  50% {
+    opacity: 0.85;
+  }
+}
+
+@keyframes auth-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(1.5rem) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .page-home {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+  background: var(--color-bg);
+}
+
+.page-home__bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.page-home__orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(72px);
+  animation: brand-float 14s ease-in-out infinite;
+}
+
+.page-home__orb--1 {
+  top: -8rem;
+  right: -4rem;
+  width: 22rem;
+  height: 22rem;
+  background: color-mix(in srgb, var(--primary-color) 28%, transparent);
+}
+
+.page-home__orb--2 {
+  bottom: -10rem;
+  left: -6rem;
+  width: 26rem;
+  height: 26rem;
+  background: color-mix(in srgb, var(--tertiary-color) 18%, transparent);
+  animation-delay: -5s;
+}
+
+.page-home__inner {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   gap: var(--space-8);
@@ -707,40 +807,56 @@ function Get-BrandHomePageScss {
   flex-direction: column;
   gap: var(--space-4);
   padding: var(--space-8);
-  border: 1px solid var(--color-border);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 35%, var(--color-border));
   border-radius: var(--radius-lg);
   background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--primary-color) 18%, var(--color-surface)),
-    color-mix(in srgb, var(--secondary-color) 12%, var(--color-surface))
+    145deg,
+    color-mix(in srgb, var(--primary-color) 10%, var(--color-surface)),
+    var(--color-surface) 55%,
+    var(--color-bg)
   );
+  box-shadow: var(--glow-gold);
+  animation: brand-rise 0.7s ease-out both;
 }
 
 .page-home__eyebrow {
   margin: 0;
   font-size: 0.875rem;
   font-weight: 600;
-  color: var(--secondary-color);
+  color: var(--accent-color);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.12em;
 }
 
 .page-home__title {
   margin: 0;
-  font-size: clamp(1.75rem, 4vw, 2.5rem);
-  line-height: 1.2;
+  font-size: clamp(1.75rem, 4vw, 2.75rem);
+  line-height: 1.15;
+  background: linear-gradient(
+    90deg,
+    var(--color-text),
+    var(--accent-color),
+    var(--primary-color-hover)
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: brand-shimmer 8s linear infinite;
 }
 
 .page-home__lead {
   margin: 0;
   max-width: 42rem;
   color: var(--color-text-muted);
+  animation: brand-rise 0.7s ease-out 0.1s both;
 }
 
 .page-home__actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
+  animation: brand-rise 0.7s ease-out 0.2s both;
 }
 
 .page-home__grid {
@@ -760,13 +876,33 @@ function Get-BrandHomePageScss {
   padding: var(--space-6);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  background: var(--color-surface);
-  border-top: 3px solid var(--primary-color);
+  background: color-mix(in srgb, var(--color-surface) 92%, var(--color-bg));
+  border-top: 2px solid var(--primary-color);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  animation: brand-rise 0.7s ease-out both;
+}
+
+.page-home__card:nth-child(1) {
+  animation-delay: 0.25s;
+}
+
+.page-home__card:nth-child(2) {
+  animation-delay: 0.35s;
+}
+
+.page-home__card:nth-child(3) {
+  animation-delay: 0.45s;
+}
+
+.page-home__card:hover {
+  border-color: color-mix(in srgb, var(--primary-color) 55%, var(--color-border));
+  box-shadow: var(--glow-gold);
+  transform: translateY(-2px);
 }
 
 .page-home__card-title {
   margin: 0 0 var(--space-2);
-  color: var(--secondary-color);
+  color: var(--accent-color);
 }
 
 .page-home__card-text {
@@ -782,7 +918,7 @@ function Get-BrandHomePageScss {
 
 .site-header__brand {
   font-weight: 700;
-  color: var(--secondary-color);
+  color: var(--accent-color);
 }
 
 .layout-main {
@@ -790,48 +926,139 @@ function Get-BrandHomePageScss {
 }
 
 .page-auth {
+  position: relative;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-4);
+  align-items: center;
+  justify-content: center;
   min-height: 100vh;
+  padding: var(--space-6);
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.page-auth__bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      circle at 20% 20%,
+      color-mix(in srgb, var(--primary-color) 22%, transparent),
+      transparent 45%
+    ),
+    radial-gradient(
+      circle at 80% 80%,
+      color-mix(in srgb, var(--tertiary-color) 14%, transparent),
+      transparent 50%
+    );
+  animation: brand-glow-pulse 6s ease-in-out infinite;
+}
+
+.page-auth__panel {
+  position: relative;
+  z-index: 1;
+  width: min(26rem, 100%);
   padding: var(--space-8);
-  background: linear-gradient(
-    160deg,
-    color-mix(in srgb, var(--primary-color) 14%, var(--color-bg)),
-    var(--color-bg)
-  );
+  border: 1px solid color-mix(in srgb, var(--primary-color) 40%, var(--color-border));
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  box-shadow: var(--glow-gold);
+  animation: auth-panel-in 0.65s ease-out both;
+}
+
+.page-auth__brand {
+  margin: 0 0 var(--space-2);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-color);
 }
 
 .page-auth__title {
-  margin: 0;
-  color: var(--secondary-color);
+  margin: 0 0 var(--space-2);
+  font-size: clamp(1.5rem, 3vw, 2rem);
+  color: var(--color-text);
+}
+
+.page-auth__lead {
+  margin: 0 0 var(--space-6);
+  color: var(--color-text-muted);
+  font-size: 0.9375rem;
+  line-height: 1.5;
 }
 
 .page-auth__form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  width: min(24rem, 100%);
+  gap: var(--space-4);
 }
 
 .page-auth__label {
-  font-size: var(--text-sm);
+  font-size: 0.8125rem;
+  font-weight: 600;
   color: var(--color-text-muted);
 }
 
 .page-auth__input {
   width: 100%;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-surface);
+  background: var(--color-bg);
   color: var(--color-text);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.page-auth__input:focus-visible {
+  outline: none;
+  border-color: var(--primary-color-hover);
+  box-shadow: var(--focus-ring);
 }
 
 .page-auth__error {
   margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 40%, transparent);
+  background: color-mix(in srgb, var(--danger-color) 12%, var(--color-surface));
   color: var(--danger-color);
+  font-size: 0.875rem;
+  animation: brand-rise 0.35s ease-out both;
+}
+
+.page-auth__submit {
+  margin-top: var(--space-2);
+}
+
+.page-auth__back {
+  color: var(--primary-color-hover);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--primary-color) 50%, transparent);
+}
+
+.page-auth__back:hover {
+  color: var(--accent-color);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-home__orb,
+  .page-home__hero,
+  .page-home__lead,
+  .page-home__actions,
+  .page-home__card,
+  .page-home__title,
+  .page-auth__panel,
+  .page-auth__error,
+  .page-auth__bg {
+    animation: none;
+  }
+
+  .page-home__title {
+    color: var(--color-text);
+    background: none;
+    -webkit-text-fill-color: unset;
+  }
 }
 '@
 }
@@ -1299,7 +1526,7 @@ function Invoke-DjangoCreatesuperuser {
             Write-Host "  Base : SQLite (db.sqlite3). Activez .env + Docker pour PostgreSQL." -ForegroundColor DarkGray
         }
         Write-Host "  Laissez vide uniquement si vous le creerez plus tard." -ForegroundColor DarkGray
-        $skip = (Read-Host "Creer un superuser maintenant ? (O/n)").Trim()
+        $skip = (Read-Host "Creer un superuser maintenant ? (Y/n)").Trim()
         if ($skip -match '^[Nn]') {
             Write-Host "     createsuperuser ignore - plus tard : uv run python manage.py createsuperuser" -ForegroundColor DarkYellow
             return
@@ -2753,6 +2980,15 @@ body {
   background: var(--color-bg);
   color: var(--color-text);
 }
+
+code {
+  padding: 0.125rem 0.375rem;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 35%, var(--color-border));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--color-surface));
+  color: var(--accent-color);
+  font-size: 0.875em;
+}
 '@
 
     Write-TextFile -Path (Join-Path $appDir "layout.tsx") -Content @'
@@ -2785,36 +3021,48 @@ const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 export default function HomePage() {
   return (
     <main className="page-home">
-      <header className="page-home__hero">
-        <p className="page-home__eyebrow">Django + uv + Next.js</p>
-        <h1 className="page-home__title">Bienvenue sur votre application</h1>
-        <p className="page-home__lead">
-          UI produit et administration custom. API metier :{" "}
-          <code>{apiUrl}</code>
-        </p>
-        <div className="page-home__actions">
-          <Link href="/admin" className="btn btn--primary">
-            Administration
-          </Link>
-          <Link href="/login" className="btn btn--secondary">
-            Connexion
-          </Link>
-        </div>
-      </header>
-      <section className="page-home__grid">
-        <article className="page-home__card">
-          <h2 className="page-home__card-title">API Django</h2>
-          <p className="page-home__card-text">
-            Service Layer, DRF et persistance via migrations ORM.
+      <div className="page-home__bg" aria-hidden="true">
+        <span className="page-home__orb page-home__orb--1" />
+        <span className="page-home__orb page-home__orb--2" />
+      </div>
+      <div className="page-home__inner">
+        <header className="page-home__hero">
+          <p className="page-home__eyebrow">Django · uv · Next.js</p>
+          <h1 className="page-home__title">Votre stack, en or et noir</h1>
+          <p className="page-home__lead">
+            Interface produit et DataStudio admin. API metier :{" "}
+            <code>{apiUrl}</code>
           </p>
-        </article>
-        <article className="page-home__card">
-          <h2 className="page-home__card-title">Admin Next.js</h2>
-          <p className="page-home__card-text">
-            Registry, schema des tables et CRUD (roadmap V1-V3).
-          </p>
-        </article>
-      </section>
+          <div className="page-home__actions">
+            <Link href="/admin" className="btn btn--primary">
+              Administration
+            </Link>
+            <Link href="/login" className="btn btn--secondary">
+              Connexion
+            </Link>
+          </div>
+        </header>
+        <section className="page-home__grid">
+          <article className="page-home__card">
+            <h2 className="page-home__card-title">API Django</h2>
+            <p className="page-home__card-text">
+              Service Layer, DRF et persistance PostgreSQL.
+            </p>
+          </article>
+          <article className="page-home__card">
+            <h2 className="page-home__card-title">DataStudio</h2>
+            <p className="page-home__card-text">
+              Schema, relations FK et CRUD sur vos modeles.
+            </p>
+          </article>
+          <article className="page-home__card">
+            <h2 className="page-home__card-title">Docker</h2>
+            <p className="page-home__card-text">
+              Stack locale compose : backend, frontend et base.
+            </p>
+          </article>
+        </section>
+      </div>
     </main>
   );
 }

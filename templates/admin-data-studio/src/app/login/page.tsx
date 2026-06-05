@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useState } from "react";
 
@@ -32,10 +33,9 @@ export default function LoginPage() {
       let message = data.detail ?? "Identifiants invalides ou acces refuse.";
       if (data.code === "not_superuser") {
         message +=
-          " Creez un superuser dans la base Docker : docker compose exec web uv run python manage.py createsuperuser";
+          " Creez un superuser : docker compose exec web uv run python manage.py createsuperuser";
       } else if (data.code === "invalid_credentials") {
-        message +=
-          " (Docker ? le compte doit exister dans PostgreSQL du compose, pas seulement en SQLite locale.)";
+        message += " (compte superuser requis dans PostgreSQL Docker.)";
       }
       setError(message);
       return;
@@ -48,41 +48,52 @@ export default function LoginPage() {
 
   return (
     <main className="page-auth">
-      <h1 className="page-auth__title">Connexion DataStudio</h1>
-      <p className="page-home__lead">
-        Acces reserve aux superusers Django.
-      </p>
-      <form className="page-auth__form" onSubmit={onSubmit}>
-        <label className="page-auth__label" htmlFor="username">
-          Identifiant
-        </label>
-        <input
-          id="username"
-          className="page-auth__input"
-          name="username"
-          autoComplete="username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          required
-        />
-        <label className="page-auth__label" htmlFor="password">
-          Mot de passe
-        </label>
-        <input
-          id="password"
-          className="page-auth__input"
-          name="password"
-          type="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          required
-        />
-        {error ? <p className="page-auth__error">{error}</p> : null}
-        <button className="btn btn--primary" type="submit" disabled={loading}>
-          {loading ? "Connexion..." : "Se connecter"}
-        </button>
-      </form>
+      <div className="page-auth__bg" aria-hidden="true" />
+      <section className="page-auth__panel">
+        <p className="page-auth__brand">DataStudio</p>
+        <h1 className="page-auth__title">Connexion</h1>
+        <p className="page-auth__lead">
+          Acces reserve aux superusers Django.{" "}
+          <Link href="/" className="page-auth__back">
+            Retour accueil
+          </Link>
+        </p>
+        <form className="page-auth__form" onSubmit={onSubmit}>
+          <label className="page-auth__label" htmlFor="username">
+            Identifiant
+          </label>
+          <input
+            id="username"
+            className="page-auth__input"
+            name="username"
+            autoComplete="username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            required
+          />
+          <label className="page-auth__label" htmlFor="password">
+            Mot de passe
+          </label>
+          <input
+            id="password"
+            className="page-auth__input"
+            name="password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+          {error ? <p className="page-auth__error">{error}</p> : null}
+          <button
+            className="btn btn--primary page-auth__submit"
+            type="submit"
+            disabled={loading}
+          >
+            {loading ? "Connexion..." : "Se connecter"}
+          </button>
+        </form>
+      </section>
     </main>
   );
 }
