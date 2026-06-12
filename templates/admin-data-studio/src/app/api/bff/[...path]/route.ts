@@ -40,11 +40,19 @@ async function proxyToDjango(
     cache: "no-store",
   });
 
-  return new NextResponse(await djangoRes.text(), {
+  // Les statuts 204/205/304 (ex: DELETE -> 204) interdisent un body :
+  // sinon le constructeur Response leve "Invalid response status code".
+  const hasBody = ![101, 204, 205, 304].includes(djangoRes.status);
+  const responseBody = hasBody ? await djangoRes.text() : null;
+  const responseHeaders: Record<string, string> = {};
+  if (hasBody) {
+    responseHeaders["Content-Type"] =
+      djangoRes.headers.get("Content-Type") ?? "application/json";
+  }
+
+  return new NextResponse(responseBody, {
     status: djangoRes.status,
-    headers: {
-      "Content-Type": djangoRes.headers.get("Content-Type") ?? "application/json",
-    },
+    headers: responseHeaders,
   });
 }
 
