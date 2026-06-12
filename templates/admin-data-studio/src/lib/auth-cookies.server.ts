@@ -4,8 +4,6 @@ import { cookies } from "next/headers";
 
 import { ADMIN_ACCESS_COOKIE, authHeaders } from "@/lib/auth-cookie-names";
 
-export { ADMIN_ACCESS_COOKIE } from "@/lib/auth-cookie-names";
-
 function getApiBase(): string {
   return (
     process.env.API_INTERNAL_URL ??
@@ -18,12 +16,6 @@ function getApiBase(): string {
 export async function getServerAccessToken(): Promise<string | undefined> {
   const store = await cookies();
   return store.get(ADMIN_ACCESS_COOKIE)?.value;
-}
-
-/** Supprime le cookie JWT admin (session invalide ou logout). */
-export async function clearAdminAccessCookie(): Promise<void> {
-  const store = await cookies();
-  store.delete(ADMIN_ACCESS_COOKIE);
 }
 
 /** Verifie aupres de Django que le JWT correspond encore a un superuser existant. */

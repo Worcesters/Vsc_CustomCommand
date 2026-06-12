@@ -1,7 +1,6 @@
 import { redirect } from "next/navigation";
 import { Suspense } from "react";
 import {
-  clearAdminAccessCookie,
   getServerAccessToken,
   validateAdminSession,
 } from "@/lib/auth-cookies.server";
@@ -14,7 +13,9 @@ export default async function LoginLayout({
     if (await validateAdminSession()) {
       redirect("/admin");
     }
-    await clearAdminAccessCookie();
+    // Cookie present mais invalide : on le purge via un Route Handler (mutation
+    // cookie interdite pendant le rendu) puis retour au formulaire.
+    redirect("/api/auth/clear?next=/login");
   }
 
   return (

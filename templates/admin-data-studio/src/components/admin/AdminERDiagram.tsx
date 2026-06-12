@@ -42,8 +42,8 @@ function ErTableNode({ data }: NodeProps<Node<ErNodeData>>) {
           {table.schema}
         </span>
       </div>
-      <div className="ds-er-node__body">
-        {table.columns.slice(0, 8).map((col) => (
+      <div className="ds-er-node__body nowheel nodrag nopan">
+        {table.columns.map((col) => (
           <div key={col.name} className="ds-er-node__col">
             {col.primaryKey ? <Key size={12} className="ds-icon--pk" /> : null}
             {col.foreignKey ? <LinkIcon size={12} className="ds-icon--fk" /> : null}
@@ -51,11 +51,6 @@ function ErTableNode({ data }: NodeProps<Node<ErNodeData>>) {
             <span className="ds-er-node__col-type">{col.type}</span>
           </div>
         ))}
-        {table.columns.length > 8 ? (
-          <div className="ds-er-node__col" style={{ justifyContent: "center" }}>
-            +{table.columns.length - 8} colonnes
-          </div>
-        ) : null}
       </div>
     </div>
   );
@@ -83,12 +78,12 @@ function layoutElements(
   return { nodes: laid, edges };
 }
 
-type AdminERDiagramInnerProps = {
+type AdminERDiagramInnerProps = Readonly<{
   tables: StudioTable[];
   global: GlobalSchema;
   selectedTableId?: string;
   onTableSelect: (tableId: string) => void;
-};
+}>;
 
 function AdminERDiagramInner({
   tables,
@@ -186,10 +181,11 @@ function AdminERDiagramInner({
           elementsSelectable
           selectNodesOnDrag={false}
           panOnDrag
-          panOnScroll
+          zoomOnScroll
+          zoomOnPinch
           fitView
-          minZoom={0.25}
-          maxZoom={1.5}
+          minZoom={0.2}
+          maxZoom={2}
           defaultViewport={{ x: 0, y: 0, zoom: 0.85 }}
           proOptions={{ hideAttribution: true }}
         >
@@ -202,12 +198,12 @@ function AdminERDiagramInner({
   );
 }
 
-type AdminERDiagramProps = {
+type AdminERDiagramProps = Readonly<{
   tables: StudioTable[];
   global: GlobalSchema;
   selectedTableId?: string;
   onTableSelect: (tableId: string) => void;
-};
+}>;
 
 export function AdminERDiagram(props: AdminERDiagramProps) {
   return (

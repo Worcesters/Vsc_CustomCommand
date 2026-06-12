@@ -6,10 +6,7 @@ import {
   fetchModelSchema,
   fetchRegistry,
 } from "@/lib/admin-api-server";
-import {
-  clearAdminAccessCookie,
-  getServerAccessToken,
-} from "@/lib/auth-cookies.server";
+import { getServerAccessToken } from "@/lib/auth-cookies.server";
 import { DatabaseAdmin } from "@/components/admin/DatabaseAdmin";
 import type { GlobalSchema, ModelSchema } from "@/lib/schema-types";
 
@@ -18,7 +15,6 @@ function getApiDisplayUrl(): string {
 }
 
 async function AdminStudioLoader() {
-  let sessionExpired = false;
   try {
     const registry = await fetchRegistry();
     const global = (await fetchGlobalSchema()) as GlobalSchema;
@@ -38,18 +34,17 @@ async function AdminStudioLoader() {
     );
   } catch (error) {
     if (error instanceof AdminApiError && error.status === 401) {
-      sessionExpired = true;
-    } else {
-      throw error;
+      // Session expiree / token invalide : purge cookie puis retour login.
+      redirect(
+        `/api/auth/clear?next=${encodeURIComponent("/login?reason=session_expired")}`,
+      );
     }
+    if (error instanceof AdminApiError && error.status === 403) {
+      // Compte sans droits superuser ou plus aucun admin : page dediee.
+      redirect(`/api/auth/clear?next=${encodeURIComponent("/admin-unavailable")}`);
+    }
+    throw error;
   }
-
-  if (sessionExpired) {
-    await clearAdminAccessCookie();
-    redirect("/login?reason=session_expired");
-  }
-
-  throw new Error("AdminStudioLoader: etat de session inattendu.");
 }
 
 export default async function AdminPage() {

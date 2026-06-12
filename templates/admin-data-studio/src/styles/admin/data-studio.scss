@@ -368,10 +368,7 @@
 }
 
 .ds-er-node__head,
-.ds-er-node__body,
-.ds-er-node__col,
-.ds-er-node__head span,
-.ds-er-node__col svg {
+.ds-er-node__head span {
   pointer-events: none;
   user-select: none;
 }
@@ -412,8 +409,27 @@
 }
 
 .ds-er-node__body {
-  max-height: 11rem;
+  max-height: 12rem;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+  user-select: none;
+  cursor: default;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ds-border) transparent;
+}
+
+.ds-er-node__body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.ds-er-node__body::-webkit-scrollbar-thumb {
+  background: var(--ds-border);
+  border-radius: 4px;
+}
+
+.ds-er-node__body::-webkit-scrollbar-thumb:hover {
+  background: var(--ds-primary);
 }
 
 .ds-er-node__col {

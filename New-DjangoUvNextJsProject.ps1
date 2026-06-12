@@ -1,12 +1,14 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Cree un monorepo Django + uv + Next.js + Docker + admin custom Next.js.
+  Cree un projet Django + uv + Docker, avec ou sans Next.js (question interactive).
 
 .DESCRIPTION
   Pipeline : uv, Django (Service Layer), apps/admin_panel (API /api/admin/),
-  Next.js admin Flat High-End (/admin, /login), Docker Compose, Cursor rules, pytest.
-  Sans HTMX. Django /admin optionnel en dev (DJANGO_ADMIN_ENABLED).
+  option Next.js (DataStudio /admin, /login), Docker Compose (db + web, + frontend si Next),
+  Cursor rules, pytest. Sans HTMX. Django /django-admin/ optionnel en dev (DJANGO_ADMIN_ENABLED).
+  En mode interactif : question Next.js (UI DataStudio) puis admin custom (admin_panel).
+  Reponse N admin custom = django.contrib.admin ; Next.js independant (avertissement si Next sans admin_panel).
 
 .PARAMETER ProjectName
   Nom du nouveau dossier (si -NewFolder).
@@ -23,8 +25,17 @@
 .PARAMETER UseCurrentFolder
   Force l'initialisation dans le repertoire courant.
 
+.PARAMETER SkipCustomAdmin
+  Ignore l'admin custom (pas de apps/admin_panel ni /api/admin/). Admin Django natif /django-admin/ active en dev.
+
+.PARAMETER UseCustomAdmin
+  Force l'admin custom admin_panel + API /api/admin/ (desactive la question interactive).
+
 .PARAMETER SkipFrontend
-  Ignore la generation Next.js (frontend/).
+  Ignore la generation Next.js (frontend/). En mode interactif, repondre N a la question Next.js equivaut a ce switch.
+
+.PARAMETER UseNextJs
+  Force la generation Next.js (desactive la question interactive). Par defaut : Next.js si mode interactif et reponse Y.
 
 .PARAMETER SkipDocker
   Ignore Docker (Dockerfile, compose).
@@ -35,27 +46,22 @@
 .PARAMETER SkipCreatesuperuser
   N'appelle pas manage.py createsuperuser apres les migrations.
 
-.PARAMETER InstallFrontendDeps
-  Obsolete : les deps front sont installees par defaut. Utiliser -SkipFrontendDeps pour ignorer.
-
 .PARAMETER SkipMigrate
   Ignore la migration initiale Django.
 
-.PARAMETER MigrateTimeoutSeconds
-  Timeout de la migration initiale (defaut : 120s).
-
 .PARAMETER CommandTimeoutSeconds
-  Timeout des commandes uv (defaut : 900s).
+  Timeout des commandes longues (uv, pnpm/npm install) en secondes (defaut : 900s).
 
 .PARAMETER NoInteractive
-  Desactive les questions interactives (equivalent -NewFolder si ProjectName fourni).
+  Desactive les questions interactives. Defaut sans flags : stack complete
+  (Next.js + admin custom). Utiliser -SkipFrontend / -SkipCustomAdmin pour reduire.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1
+  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvNextJsProject.ps1
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1 -NewFolder mon_site -AppName core -NoInteractive
+  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvNextJsProject.ps1 -NewFolder mon_site -NoInteractive -UseNextJs -UseCustomAdmin
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1 -NewFolder mon_site -ParentPath E:\Projets -NoInteractive
+  powershell -ExecutionPolicy Bypass -File .\New-DjangoUvNextJsProject.ps1 -NewFolder mon_site -NoInteractive -SkipFrontend -SkipCustomAdmin
 #>
 
 [CmdletBinding()]
@@ -71,20 +77,24 @@ param(
 
     [switch]$NewFolder,
     [switch]$UseCurrentFolder,
+    [switch]$SkipCustomAdmin,
+    [switch]$UseCustomAdmin,
     [switch]$SkipFrontend,
+    [switch]$UseNextJs,
     [switch]$SkipDocker,
-    [switch]$InstallFrontendDeps,
     [switch]$SkipFrontendDeps,
     [switch]$SkipCreatesuperuser,
     [switch]$SkipMigrate,
     [switch]$NoInteractive,
-    [int]$MigrateTimeoutSeconds = 120,
     [int]$CommandTimeoutSeconds = 900
 )
 
 $script:PreviousErrorActionPreference = $ErrorActionPreference
+$script:PreviousProgressPreference = $ProgressPreference
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+# Pas de bandeau Write-Progress (popup PowerShell) pendant le pipeline.
+$ProgressPreference = "SilentlyContinue"
 # Evite que les warnings stderr de "docker compose" (ex. variable attempt) declenchent un arret.
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
     $script:PreviousNativeCommandErrorPreference = $PSNativeCommandUseErrorActionPreference
@@ -97,6 +107,15 @@ $script:DbEnvKeys = @(
     "DJANGO_DB_HOST", "DJANGO_DB_ENGINE", "DJANGO_DB_NAME",
     "DJANGO_DB_USER", "DJANGO_DB_PASSWORD", "DJANGO_DB_PORT", "DJANGO_USE_POSTGRES"
 )
+
+function Get-CorsOrigins {
+    # Source unique des origines CORS/CSRF selon la presence du frontend Next.js.
+    param([bool]$HasFrontend)
+    if ($HasFrontend) {
+        return "http://localhost:3000,http://127.0.0.1:3000"
+    }
+    return "http://localhost:8000"
+}
 
 function Test-LocalTcpPortAvailable {
     param([Parameter(Mandatory)][int]$Port)
@@ -336,9 +355,11 @@ function Import-ProjectDotEnv {
 function Write-ProjectDotEnvForDocker {
     param(
         [Parameter(Mandatory)][string]$Root,
-        [int]$PostgresHostPort = 5433
+        [int]$PostgresHostPort = 5433,
+        [bool]$HasFrontend = $true
     )
 
+    $corsOrigins = Get-CorsOrigins -HasFrontend $HasFrontend
     $content = @"
 # Genere par New-DjangoUvNextJsProject.ps1 - PostgreSQL = base Django unique (hote + Docker)
 
@@ -352,7 +373,7 @@ DJANGO_DB_USER=app
 DJANGO_DB_PASSWORD=dev
 DJANGO_DB_HOST=localhost
 DJANGO_DB_PORT=$PostgresHostPort
-CORS_ALLOWED_ORIGINS=http://localhost:3000
+CORS_ALLOWED_ORIGINS=$corsOrigins
 
 # Superuser (optionnel, init ou docker-compose service web)
 # DJANGO_SUPERUSER_USERNAME=admin
@@ -422,7 +443,7 @@ Arretez l'autre conteneur (docker ps) ou changez le mapping dans docker-compose.
             Start-Sleep -Seconds 1
         }
         if (-not (Test-PostgresHostTcpReady -Port $hostPort)) {
-            throw "PostgreSQL (service db) non pret apres ${TimeoutSeconds}s"
+            throw "PostgreSQL (service db) non pret apres $($TimeoutSeconds)s"
         }
         $script:ComposeDatabaseReady = $true
         Write-Host "     PostgreSQL pret (localhost:$hostPort, user app / password dev)" -ForegroundColor DarkGray
@@ -550,48 +571,6 @@ function Invoke-DjangoMigrationBootstrap {
     }
 }
 
-function Invoke-DjangoManage {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string[]]$Arguments
-    )
-
-    $pythonExe = Join-Path $Root ".venv\Scripts\python.exe"
-    if (-not (Test-Path -LiteralPath $pythonExe)) {
-        throw "Python venv introuvable. Lancez d'abord: uv sync"
-    }
-
-    $savedEnv = @{}
-    $usePostgresEnv = Test-ProjectDotEnvUsesPostgres -Root $Root
-    if ($usePostgresEnv) {
-        Import-ProjectDotEnv -Root $Root
-    } else {
-        foreach ($key in $script:DbEnvKeys) {
-            $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-            if ($null -ne $item) {
-                $savedEnv[$key] = $item.Value
-                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-            }
-        }
-    }
-
-    try {
-        $env:DJANGO_ENV = "dev"
-        $env:DJANGO_SETTINGS_MODULE = "config.settings"
-        Invoke-NativeCli -Exe $pythonExe -Arguments (@("manage.py") + $Arguments) `
-            -WorkingDirectory $Root -Quiet
-    } finally {
-        if (-not $usePostgresEnv) {
-            foreach ($key in $script:DbEnvKeys) {
-                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-            }
-            foreach ($key in $savedEnv.Keys) {
-                Set-Item -Path "Env:$key" -Value $savedEnv[$key]
-            }
-        }
-    }
-}
-
 function Write-Failure {
     param([string]$Message)
     $script:ScaffoldFailed = $true
@@ -601,6 +580,9 @@ function Write-Failure {
 
 function Restore-ShellPreferences {
     $ErrorActionPreference = $script:PreviousErrorActionPreference
+    if ($null -ne $script:PreviousProgressPreference) {
+        $ProgressPreference = $script:PreviousProgressPreference
+    }
     if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
         if ($null -ne $script:PreviousNativeCommandErrorPreference) {
             $PSNativeCommandUseErrorActionPreference = $script:PreviousNativeCommandErrorPreference
@@ -638,6 +620,7 @@ function Get-AvailableProjectPath {
 }
 
 # --- Pipeline UI ---
+# Valeur recalculee dynamiquement selon les options (cf. bloc principal).
 $script:PipelineTotal = 11
 $script:PipelineStep = 0
 $script:StepWatch = $null
@@ -684,7 +667,7 @@ function Complete-PipelineStep {
     if ($null -ne $script:StepWatch) {
         $script:StepWatch.Stop()
         $sec = [math]::Round($script:StepWatch.Elapsed.TotalSeconds, 1)
-        Write-Host "     [OK] $Message (${sec}s)" -ForegroundColor Green
+        Write-Host "     [OK] $Message ($($sec)s)" -ForegroundColor Green
     } else {
         Write-Host "     [OK] $Message" -ForegroundColor Green
     }
@@ -694,6 +677,7 @@ function Write-PipelineSummary {
     param(
         [string]$Root,
         [string]$AppName,
+        [bool]$HasCustomAdmin,
         [bool]$HasFrontend,
         [bool]$HasDocker
     )
@@ -703,22 +687,41 @@ function Write-PipelineSummary {
     Write-Host ("=" * 62) -ForegroundColor Green
     Write-Host "  Racine      : $Root"
     Write-Host "  App Django  : apps.$AppName"
+    $adminLabel = if ($HasCustomAdmin) { "admin_panel + /api/admin/" } else { "django.contrib.admin (/django-admin/)" }
+    Write-Host "  Admin       : $adminLabel"
     Write-Host ""
     Write-Host "  Backend (dev) :" -ForegroundColor White
     Write-Host "    cd `"$Root`""
     Write-Host "    uv run python manage.py runserver"
     if ($HasFrontend) {
         Write-Host ""
-        Write-Host "  Frontend (dev) :" -ForegroundColor White
-        Write-Host "    cd `"$Root\frontend`""
-        Write-Host "    pnpm dev   # deps installees a l'init (lockfile)"
+        Write-Host "  IMPORTANT : le port 3000 ne repond que si Next.js est demarre." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  Demarrage rapide (2 terminaux) :" -ForegroundColor White
+        Write-Host "    .\scripts\dev-local.ps1"
+        Write-Host ""
+        Write-Host "  Ou manuellement :" -ForegroundColor White
+        Write-Host "    Terminal 1 : cd `"$Root`" ; uv run python manage.py runserver"
+        Write-Host "    Terminal 2 : cd `"$Root\frontend`" ; pnpm dev"
+        Write-Host ""
+        Write-Host "  URLs :" -ForegroundColor White
+        Write-Host "    http://127.0.0.1:3000        (accueil)"
+        Write-Host "    http://127.0.0.1:3000/admin  (DataStudio)"
+        Write-Host "    http://127.0.0.1:3000/login"
     }
     if ($HasDocker) {
         Write-Host ""
-        Write-Host "  Docker (stack complete) :" -ForegroundColor White
-        Write-Host "    cd `"$Root`""
-        Write-Host "    `$env:DOCKER_BUILDKIT=1; docker compose up --build"
-        Write-Host "    (deps front au build ; conteneur demarre sur pnpm dev)"
+        if ($HasFrontend) {
+            Write-Host "  Docker (db + web + frontend) :" -ForegroundColor White
+            Write-Host "    cd `"$Root`""
+            Write-Host "    `$env:DOCKER_BUILDKIT=1; docker compose up --build"
+            Write-Host "    (deps front au build ; conteneur demarre sur pnpm dev)"
+        } else {
+            Write-Host "  Docker (db + web Django uniquement) :" -ForegroundColor White
+            Write-Host "    cd `"$Root`""
+            Write-Host "    `$env:DOCKER_BUILDKIT=1; docker compose up --build"
+            Write-Host "    API : http://localhost:8000 - admin Django dev : /django-admin/"
+        }
     }
     Write-Host ""
     Write-Host "  Cursor      : .cursor/AGENTS.md + .cursor/rules/" -ForegroundColor DarkGray
@@ -726,6 +729,11 @@ function Write-PipelineSummary {
 }
 
 # --- Utilitaires ---
+
+function Test-IsWindowsPlatform {
+    # True sur Windows ; compatible PS 5.1 (pas de variable automatique $IsWindows).
+    return ($env:OS -eq "Windows_NT")
+}
 
 function Test-PythonIdentifier {
     param([string]$Name)
@@ -742,31 +750,43 @@ function Test-PythonIdentifier {
 function Get-BrandCharteTokensScss {
     @'
 :root {
-  --color-bg: #080808;
-  --color-text: #f5efe3;
-  --color-text-muted: #a89a72;
-  --color-border: #2e2a1c;
-  --color-surface: #11100c;
+  /* ================================================================
+     PALETTE PRINCIPALE - source de verite unique.
+     Modifiez uniquement ces 5 variables pour reskinner tout le site.
+     ================================================================ */
+  --brand-bg: #080808;          /* Fond principal */
+  --brand-panel: #11100c;       /* Panneaux / Sidebar */
+  --brand-text: #f5efe3;        /* Texte principal */
+  --brand-text-muted: #a89a72;  /* Texte secondaire */
+  --brand-accent: #d4af37;      /* Couleur d'accent : boutons, liens, selection */
 
-  --primary-color: #b8860b;
-  --primary-color-hover: #d4af37;
-  --primary-color-active: #96700a;
-  --primary-color-on: #080808;
+  /* ---- Semantiques derivees de la palette (a ne pas modifier en priorite) ---- */
+  --color-bg: var(--brand-bg);
+  --color-surface: var(--brand-panel);
+  --color-sidebar: var(--brand-panel);
+  --color-text: var(--brand-text);
+  --color-text-muted: var(--brand-text-muted);
+  --color-border: color-mix(in srgb, var(--brand-text) 16%, var(--brand-bg));
 
-  --secondary-color: #1a1812;
-  --secondary-color-hover: #262218;
-  --secondary-color-active: #12100c;
-  --secondary-color-on: #d4af37;
+  --primary-color: var(--brand-accent);
+  --primary-color-hover: color-mix(in srgb, var(--brand-accent) 82%, #ffffff);
+  --primary-color-active: color-mix(in srgb, var(--brand-accent) 82%, #000000);
+  --primary-color-on: var(--brand-bg);
 
-  --tertiary-color: #c9a227;
-  --tertiary-color-hover: #e0bc42;
-  --tertiary-color-active: #a68518;
-  --tertiary-color-on: #080808;
+  --secondary-color: var(--brand-panel);
+  --secondary-color-hover: color-mix(in srgb, var(--brand-panel) 80%, #ffffff);
+  --secondary-color-active: color-mix(in srgb, var(--brand-panel) 82%, #000000);
+  --secondary-color-on: var(--brand-accent);
 
-  --accent-color: #e8c547;
-  --accent-color-hover: #f2d96a;
-  --accent-color-active: #c9a227;
-  --accent-color-on: #080808;
+  --tertiary-color: color-mix(in srgb, var(--brand-accent) 72%, #ffffff);
+  --tertiary-color-hover: color-mix(in srgb, var(--brand-accent) 55%, #ffffff);
+  --tertiary-color-active: var(--brand-accent);
+  --tertiary-color-on: var(--brand-bg);
+
+  --accent-color: var(--brand-accent);
+  --accent-color-hover: color-mix(in srgb, var(--brand-accent) 80%, #ffffff);
+  --accent-color-active: color-mix(in srgb, var(--brand-accent) 82%, #000000);
+  --accent-color-on: var(--brand-bg);
 
   --success-color: #6b8f3c;
   --warning-color: #c9a227;
@@ -783,6 +803,11 @@ function Get-BrandCharteTokensScss {
   --radius-md: 0.375rem;
   --radius-lg: 0.75rem;
   --font-sans: "Inter", "Geist", system-ui, sans-serif;
+}
+
+::selection {
+  background: var(--brand-accent);
+  color: var(--brand-bg);
 }
 '@
 }
@@ -1466,23 +1491,63 @@ function Resolve-ExecutablePath {
 function Resolve-NodeToolPath {
     param([Parameter(Mandatory)][string]$Name)
 
-    $nodeDirs = @()
+    # Priorite .cmd (evite pnpm.ps1 ouvert par Windows avec Bloc-notes / dialogue « Ouvrir avec »).
+    $searchDirs = @()
     if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
-        $nodeDirs += (Join-Path $env:ProgramFiles "nodejs")
+        $searchDirs += (Join-Path $env:ProgramFiles "nodejs")
     }
     if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
-        $nodeDirs += (Join-Path ${env:ProgramFiles(x86)} "nodejs")
+        $searchDirs += (Join-Path ${env:ProgramFiles(x86)} "nodejs")
     }
-    foreach ($nodeDir in $nodeDirs) {
-        if (-not (Test-Path -LiteralPath $nodeDir)) { continue }
-        foreach ($suffix in @(".cmd", ".exe", "")) {
-            $candidate = Join-Path $nodeDir ($Name + $suffix)
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        $searchDirs += (Join-Path $env:APPDATA "npm")
+    }
+    foreach ($dir in $searchDirs) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($suffix in @(".cmd", ".exe", ".ps1")) {
+            $candidate = Join-Path $dir ($Name + $suffix)
             if (Test-Path -LiteralPath $candidate) {
                 return $candidate
             }
         }
     }
-    return Resolve-ExecutablePath -Name $Name
+    foreach ($suffix in @(".cmd", ".exe", ".ps1")) {
+        $cmd = Get-Command ($Name + $suffix) -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source) {
+            return $cmd.Source
+        }
+    }
+    return $null
+}
+
+function New-CliProcessStartInfo {
+    param(
+        [Parameter(Mandatory)][string]$ExePath,
+        [Parameter(Mandatory)][string]$ArgumentString,
+        [Parameter(Mandatory)][string]$WorkingDirectory
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $ext = [System.IO.Path]::GetExtension($ExePath).ToLowerInvariant()
+    if (Test-IsWindowsPlatform -and $ext -in @(".cmd", ".bat")) {
+        $psi.FileName = if ([string]::IsNullOrWhiteSpace($env:ComSpec)) { "cmd.exe" } else { $env:ComSpec }
+        $psi.Arguments = "/d /s /c `"`"$ExePath`" $ArgumentString`""
+    } elseif (Test-IsWindowsPlatform -and $ext -eq ".ps1") {
+        $psi.FileName = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+        if (-not (Test-Path -LiteralPath $psi.FileName)) {
+            $psi.FileName = "powershell.exe"
+        }
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ExePath`" $ArgumentString"
+    } else {
+        $psi.FileName = $ExePath
+        $psi.Arguments = $ArgumentString
+    }
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    return $psi
 }
 
 function Format-CliArgumentString {
@@ -1492,89 +1557,160 @@ function Format-CliArgumentString {
         }) -join " "
 }
 
-function Invoke-CheckedCommand {
+function Get-PreferredNodeCmdPath {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $path = Resolve-NodeToolPath -Name $Name
+    if (-not $path) { return $null }
+    if ($path -match '\.ps1$') {
+        $cmdAlt = $path -replace '\.ps1$', '.cmd'
+        if (Test-Path -LiteralPath $cmdAlt) {
+            return $cmdAlt
+        }
+    }
+    return $path
+}
+
+function Format-TextProgressBar {
     param(
-        [Parameter(Mandatory)][string]$Exe,
-        [Parameter(Mandatory)][string[]]$Arguments,
-        [Parameter(Mandatory)][string]$WorkingDirectory,
-        [switch]$Quiet,
-        [int]$TimeoutSeconds = 0,
-        [hashtable]$EnvironmentOverrides = @{}
+        [int]$Percent,
+        [int]$Width = 18
     )
-    $nodeTools = @("node", "npm", "npx", "pnpm", "corepack")
-    $exePath = if ($Exe -in $nodeTools) {
-        Resolve-NodeToolPath -Name $Exe
-    } else {
-        Resolve-ExecutablePath -Name $Exe
+    $pct = [math]::Max(0, [math]::Min(100, $Percent))
+    $filled = [math]::Floor($Width * $pct / 100)
+    $empty = $Width - $filled
+    return ('[' + ('#' * $filled) + ('-' * $empty) + ']')
+}
+
+function Get-LogTailStatusLine {
+    param(
+        [Parameter(Mandatory)][string]$LogFile,
+        [int]$MaxLength = 80
+    )
+
+    if (-not (Test-Path -LiteralPath $LogFile)) {
+        return $null
     }
-    if (-not $exePath) {
-        throw "Executable introuvable : $Exe"
+    $lines = @(Get-Content -LiteralPath $LogFile -Tail 8 -ErrorAction SilentlyContinue |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -eq 0) {
+        return $null
     }
-    $argString = Format-CliArgumentString -Arguments $Arguments
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $isWindows = ($IsWindows -or $env:OS -eq "Windows_NT")
-    $ext = [System.IO.Path]::GetExtension($exePath).ToLowerInvariant()
-    if ($isWindows -and $ext -in @(".cmd", ".bat")) {
-        $psi.FileName = if ([string]::IsNullOrWhiteSpace($env:ComSpec)) { "cmd.exe" } else { $env:ComSpec }
-        $psi.Arguments = "/d /s /c `"`"$exePath`" $argString`""
-    } else {
-        $psi.FileName = $exePath
-        $psi.Arguments = $argString
+    $line = [string]$lines[-1]
+    $line = $line -replace '\x1B\[[0-9;?]*[ -/]*[@-~]', ''
+    $line = $line.Trim()
+    if ($line.Length -gt $MaxLength) {
+        return $line.Substring(0, $MaxLength - 3) + "..."
     }
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-    $psi.WorkingDirectory = $WorkingDirectory
-    foreach ($key in $EnvironmentOverrides.Keys) {
-        $value = [string]$EnvironmentOverrides[$key]
-        if ([string]::IsNullOrEmpty($value)) {
-            if ($psi.EnvironmentVariables.ContainsKey($key)) {
-                [void]$psi.EnvironmentVariables.Remove($key)
+    return $line
+}
+
+function Invoke-CmdBatchLogged {
+    param(
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [Parameter(Mandatory)][string]$CommandLine,
+        [int]$TimeoutSeconds = 0,
+        [int]$ProgressEstimateSeconds = 240,
+        [switch]$Quiet,
+        [switch]$ShowProgress,
+        [string]$ProgressActivity = "Commande en cours"
+    )
+
+    $logFile = Join-Path $env:TEMP ("nextjs-cli-" + [guid]::NewGuid().ToString("n") + ".log")
+    $batchFile = Join-Path $env:TEMP ("nextjs-run-" + [guid]::NewGuid().ToString("n") + ".cmd")
+    $wd = $WorkingDirectory.Replace('"', '""')
+    $log = $logFile.Replace('"', '""')
+
+    $batchContent = @"
+@echo off
+setlocal
+set CI=true
+set FORCE_COLOR=0
+set NO_COLOR=1
+set npm_config_progress=false
+set GIT_EDITOR=true
+set EDITOR=true
+set VISUAL=true
+cd /d "$wd"
+$CommandLine >> "$log" 2>&1
+exit /b %ERRORLEVEL%
+"@
+    Set-Content -LiteralPath $batchFile -Value $batchContent -Encoding ASCII
+
+    $exitCode = 1
+    $proc = $null
+    try {
+        if (-not $Quiet -and -not $ShowProgress) {
+            Write-Host "     Log temporaire : $logFile" -ForegroundColor DarkGray
+        }
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "cmd.exe"
+        $psi.Arguments = "/d /c `"`"$batchFile`"`""
+        $psi.WorkingDirectory = $WorkingDirectory
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $estimate = [math]::Max(60, $ProgressEstimateSeconds)
+        $lastStatus = "Demarrage..."
+        $lastPrintedSecond = -1
+
+        while (-not $proc.HasExited) {
+            if ($TimeoutSeconds -gt 0 -and $watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                try { $proc.Kill() } catch {}
+                throw "Timeout ($($TimeoutSeconds)s). Log : $logFile"
             }
-        } else {
-            $psi.EnvironmentVariables[$key] = $value
+
+            if ($ShowProgress) {
+                $elapsed = [math]::Floor($watch.Elapsed.TotalSeconds)
+                if ($elapsed -ne $lastPrintedSecond) {
+                    $lastPrintedSecond = $elapsed
+                    $statusLine = Get-LogTailStatusLine -LogFile $logFile
+                    if ($statusLine) {
+                        $lastStatus = $statusLine
+                    }
+                    $pct = [math]::Min(99, [int](($watch.Elapsed.TotalSeconds / $estimate) * 100))
+                    $bar = Format-TextProgressBar -Percent $pct
+                    $line = "     $bar $pct%  ${elapsed}s  $lastStatus"
+                    if ($line.Length -gt 95) {
+                        $line = $line.Substring(0, 92) + "..."
+                    }
+                    Write-Host ("`r$line".PadRight(95)) -NoNewline -ForegroundColor DarkGray
+                }
+            }
+
+            Start-Sleep -Milliseconds 500
         }
-    }
-    $p = [System.Diagnostics.Process]::Start($psi)
-    $stdoutBuilder = New-Object System.Text.StringBuilder
-    $stderrBuilder = New-Object System.Text.StringBuilder
-    $outHandler = [System.Diagnostics.DataReceivedEventHandler]{
-        param($sender, $args)
-        if ($null -ne $args.Data) {
-            [void]$stdoutBuilder.AppendLine($args.Data)
+
+        if ($ShowProgress) {
+            $sec = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+            Write-Host ""
+            Write-Host "     [OK] $ProgressActivity ($sec s)" -ForegroundColor Green
         }
-    }
-    $errHandler = [System.Diagnostics.DataReceivedEventHandler]{
-        param($sender, $args)
-        if ($null -ne $args.Data) {
-            [void]$stderrBuilder.AppendLine($args.Data)
+
+        $exitCode = $proc.ExitCode
+        if ($exitCode -ne 0) {
+            $tail = @()
+            if (Test-Path -LiteralPath $logFile) {
+                $tail = @(Get-Content -LiteralPath $logFile -Tail 50 -ErrorAction SilentlyContinue)
+            }
+            $detail = if ($tail.Count -gt 0) { ($tail -join [Environment]::NewLine) } else { "(log vide)" }
+            throw "Commande echouee (code $exitCode). Dernieres lignes :`n$detail"
         }
-    }
-    $p.add_OutputDataReceived($outHandler)
-    $p.add_ErrorDataReceived($errHandler)
-    $p.BeginOutputReadLine()
-    $p.BeginErrorReadLine()
-    if ($TimeoutSeconds -gt 0) {
-        $timedOut = -not $p.WaitForExit($TimeoutSeconds * 1000)
-        if ($timedOut) {
-            try { $p.Kill() } catch {}
-            throw "Timeout (${TimeoutSeconds}s) : $Exe $($psi.Arguments)"
+    } finally {
+        if ($null -ne $proc -and -not $proc.HasExited) {
+            try { $proc.Kill() } catch {}
         }
-    } else {
-        $p.WaitForExit()
-    }
-    Start-Sleep -Milliseconds 150
-    $out = $stdoutBuilder.ToString()
-    $err = $stderrBuilder.ToString()
-    if ($p.ExitCode -ne 0) {
-        if ($out) { Write-Host $out }
-        if ($err) { Write-Host $err }
-        throw "Commande echouee (code $($p.ExitCode)) : $Exe $($psi.Arguments)"
-    }
-    if (-not $Quiet -and $out) {
-        $trimmed = $out.TrimEnd()
-        if ($trimmed.Length -gt 0) { Write-Host "     $trimmed" -ForegroundColor DarkGray }
+        Remove-Item -LiteralPath $batchFile -Force -ErrorAction SilentlyContinue
+        if ($exitCode -eq 0) {
+            Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+        } elseif (-not $Quiet -and -not $ShowProgress) {
+            Write-Host "     Log conserve pour diagnostic : $logFile" -ForegroundColor DarkYellow
+        } elseif ($exitCode -ne 0 -and $ShowProgress) {
+            Write-Host "     Log conserve pour diagnostic : $logFile" -ForegroundColor DarkYellow
+        }
     }
 }
 
@@ -1599,7 +1735,17 @@ function Invoke-NativeCli {
     }
     Push-Location -LiteralPath $WorkingDirectory
     try {
-        & $exePath @Arguments
+        $ext = [System.IO.Path]::GetExtension($exePath).ToLowerInvariant()
+        if (Test-IsWindowsPlatform -and $ext -in @(".cmd", ".bat")) {
+            $argString = Format-CliArgumentString -Arguments $Arguments
+            & cmd.exe /d /s /c "`"$exePath`" $argString"
+        } elseif (Test-IsWindowsPlatform -and $ext -eq ".ps1") {
+            $pwsh = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+            if (-not (Test-Path -LiteralPath $pwsh)) { $pwsh = "powershell.exe" }
+            & $pwsh -NoProfile -ExecutionPolicy Bypass -File $exePath @Arguments
+        } else {
+            & $exePath @Arguments
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "Commande echouee (code $LASTEXITCODE) : $Exe $($Arguments -join ' ')"
         }
@@ -1617,48 +1763,6 @@ function Invoke-UvCommand {
     Invoke-NativeCli -Exe "uv" -Arguments $Arguments -WorkingDirectory $WorkingDirectory -Quiet:$Quiet
 }
 
-function Invoke-DjangoMigrate {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [int]$TimeoutSeconds
-    )
-    $pythonExe = Join-Path $Root ".venv\Scripts\python.exe"
-    if (-not (Test-Path -LiteralPath $pythonExe)) {
-        throw "Python venv introuvable. Lancez d'abord: uv sync"
-    }
-
-    $savedEnv = @{}
-    $usePostgresEnv = Test-ProjectDotEnvUsesPostgres -Root $Root
-    if ($usePostgresEnv) {
-        Import-ProjectDotEnv -Root $Root
-    } else {
-        foreach ($key in $script:DbEnvKeys) {
-            $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-            if ($null -ne $item) {
-                $savedEnv[$key] = $item.Value
-                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-            }
-        }
-    }
-
-    try {
-        $env:DJANGO_ENV = "dev"
-        $env:DJANGO_SETTINGS_MODULE = "config.settings"
-        Invoke-NativeCli -Exe $pythonExe -Arguments @(
-            "manage.py", "migrate", "--noinput", "--verbosity", "1"
-        ) -WorkingDirectory $Root -Quiet
-    } finally {
-        if (-not $usePostgresEnv) {
-            foreach ($key in $script:DbEnvKeys) {
-                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-            }
-            foreach ($key in $savedEnv.Keys) {
-                Set-Item -Path "Env:$key" -Value $savedEnv[$key]
-            }
-        }
-    }
-}
-
 function Invoke-DjangoCreatesuperuser {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -1671,23 +1775,9 @@ function Invoke-DjangoCreatesuperuser {
     }
 
     $savedEnv = @{}
-    $usePostgresEnv = Test-ProjectDotEnvUsesPostgres -Root $Root
-    if ($usePostgresEnv) {
-        Import-ProjectDotEnv -Root $Root
-    } else {
-        foreach ($key in $script:DbEnvKeys) {
-            $item = Get-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-            if ($null -ne $item) {
-                $savedEnv[$key] = $item.Value
-                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-            }
-        }
-    }
+    $usePostgresEnv = Set-DjangoManageEnvironment -Root $Root -SavedEnv ([ref]$savedEnv)
 
     try {
-        $env:DJANGO_ENV = "dev"
-        $env:DJANGO_SETTINGS_MODULE = "config.settings"
-
         if ($NoInteractive) {
             $user = $env:DJANGO_SUPERUSER_USERNAME
             $pass = $env:DJANGO_SUPERUSER_PASSWORD
@@ -1727,22 +1817,66 @@ function Invoke-DjangoCreatesuperuser {
             "manage.py", "createsuperuser"
         ) -WorkingDirectory $Root
     } finally {
-        if (-not $usePostgresEnv) {
-            foreach ($key in $script:DbEnvKeys) {
-                Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue
-            }
-            foreach ($key in $savedEnv.Keys) {
-                Set-Item -Path "Env:$key" -Value $savedEnv[$key]
-            }
-        }
+        Restore-DjangoManageEnvironment -UsePostgresEnv $usePostgresEnv -SavedEnv $savedEnv
     }
 }
 
 function New-DjangoConfigPackage {
     param(
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$AppName
+        [Parameter(Mandatory)][string]$AppName,
+        [bool]$HasCustomAdmin = $true,
+        [bool]$HasFrontend = $true
     )
+
+    $adminPanelAppLine = if ($HasCustomAdmin) { '    "apps.admin_panel",' + "`n" } else { "" }
+    $djangoAdminEnvDefault = if ($HasCustomAdmin) { '"false"' } else { '"true"' }
+    $corsDefault = Get-CorsOrigins -HasFrontend $HasFrontend
+    # Avec Next.js, l'UI produit vit dans frontend/ : pas de templates/ ni static/scss Django.
+    # APP_DIRS=True suffit pour l'admin Django ; staticfiles sert l'admin automatiquement.
+    $templatesDirs = if ($HasFrontend) { "[]" } else { '[BASE_DIR / "templates"]' }
+    $staticfilesDirsBlock = if ($HasFrontend) {
+        ""
+    } else {
+        "STATICFILES_DIRS = [BASE_DIR / `"static`"]`n"
+    }
+    $restAuthClasses = if ($HasCustomAdmin) {
+        '        "rest_framework_simplejwt.authentication.JWTAuthentication",'
+    } else {
+        '        "rest_framework.authentication.SessionAuthentication",'
+    }
+    $simpleJwtBlock = if ($HasCustomAdmin) {
+        @'
+
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+    "AUTH_HEADER_TYPES": ("Bearer",),
+}
+'@
+    } else {
+        ""
+    }
+    $urlAdminApiBlock = if ($HasCustomAdmin) {
+        @'
+    path("api/auth/", include("apps.admin_panel.auth_urls")),
+    path("api/admin/", include("apps.admin_panel.urls")),
+'@
+    } else {
+        ""
+    }
+    $urlDjangoAdminBlock = if ($HasCustomAdmin) {
+        @'
+if getattr(settings, "DJANGO_ADMIN_ENABLED", False):
+    urlpatterns.insert(0, path("django-admin/", admin.site.urls))
+'@
+    } else {
+        @'
+urlpatterns.insert(0, path("django-admin/", admin.site.urls))
+'@
+    }
 
     $configDir = Join-Path $Root "config"
     $settingsDir = Join-Path $configDir "settings"
@@ -1836,11 +1970,10 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "apps.$AppName",
-    "apps.admin_panel",
-]
+$adminPanelAppLine]
 
-# Admin Django natif : fallback dev uniquement (desactive en prod par defaut)
-DJANGO_ADMIN_ENABLED = os.environ.get("DJANGO_ADMIN_ENABLED", "false").lower() in (
+# Admin Django natif : principal si pas d'admin custom ; fallback dev sinon
+DJANGO_ADMIN_ENABLED = os.environ.get("DJANGO_ADMIN_ENABLED", $djangoAdminEnvDefault).lower() in (
     "1",
     "true",
     "yes",
@@ -1863,7 +1996,7 @@ ROOT_URLCONF = "config.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "templates"],
+        "DIRS": $templatesDirs,
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -1895,8 +2028,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_DIRS = [BASE_DIR / "static"]
-
+$staticfilesDirsBlock
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
@@ -1914,22 +2046,15 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.JSONParser",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+$restAuthClasses
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
 }
+$simpleJwtBlock
 
-from datetime import timedelta
-
-SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
-    "AUTH_HEADER_TYPES": ("Bearer",),
-}
-
-_cors = os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
+_cors = os.environ.get("CORS_ALLOWED_ORIGINS", "$corsDefault")
 CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()]
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
@@ -2078,25 +2203,81 @@ from config.health import HealthCheckView
 
 urlpatterns = [
     path("api/health/", HealthCheckView.as_view(), name="health"),
-    path("api/auth/", include("apps.admin_panel.auth_urls")),
-    path("api/admin/", include("apps.admin_panel.urls")),
+$urlAdminApiBlock
     path("", include("apps.$AppName.urls")),
 ]
 
-if getattr(settings, "DJANGO_ADMIN_ENABLED", False):
-    urlpatterns.insert(0, path("django-admin/", admin.site.urls))
+$urlDjangoAdminBlock
 "@
     Write-TextFile -Path (Join-Path $configDir "urls.py") -Content $configUrls
 }
 
-function New-AppServiceLayer {
+function New-DjangoNativeAdmin {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppName
     )
 
+    Write-TextFile -Path (Join-Path $Root "apps\$AppName\admin.py") -Content @'
+"""Enregistrement modeles dans django.contrib.admin."""
+
+from django.contrib import admin
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+
+@admin.register(User)
+class ProjectUserAdmin(admin.ModelAdmin):
+    """Administration des utilisateurs Django."""
+
+    list_display = ("username", "email", "is_staff", "is_active", "date_joined")
+    search_fields = ("username", "email")
+    list_filter = ("is_staff", "is_active")
+'@
+}
+
+function New-AppServiceLayer {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$AppName,
+        [bool]$HasCustomAdmin = $true,
+        [bool]$HasFrontend = $true
+    )
+
+    $homeEyebrow = if ($HasFrontend) { "Django + uv + Next.js" } else { "Django + uv" }
+    $homeLead = if ($HasCustomAdmin -and $HasFrontend) {
+        "UI produit et administration DataStudio via Next.js. API metier exposee par Django/DRF."
+    } elseif ($HasCustomAdmin) {
+        "Administration via API /api/admin/ (admin_panel). Interface Next.js optionnelle."
+    } else {
+        "Application Django avec admin natif. Service Layer et API DRF pour votre metier."
+    }
+    $homeActions = if ($HasCustomAdmin -and $HasFrontend) {
+        @'
+        <a class="btn btn--primary" href="http://localhost:3000/admin">Administration</a>
+        <a class="btn btn--secondary" href="http://localhost:3000/login">Connexion</a>
+'@
+    } elseif ($HasCustomAdmin) {
+        @'
+        <a class="btn btn--primary" href="/django-admin/">Admin Django (fallback)</a>
+        <a class="btn btn--secondary" href="/api/health/">API Health</a>
+'@
+    } else {
+        @'
+        <a class="btn btn--primary" href="/django-admin/">Administration Django</a>
+        <a class="btn btn--secondary" href="/api/health/">API Health</a>
+'@
+    }
+    $card2Title = if ($HasCustomAdmin) { "Admin custom" } else { "Admin Django" }
+    $card2Text = if ($HasCustomAdmin) {
+        "Registry, schema et CRUD via admin_panel (API /api/admin/)."
+    } else {
+        "Gestion des utilisateurs et modeles via /django-admin/."
+    }
+
     $appDir = Join-Path $Root "apps\$AppName"
-    New-Item -ItemType Directory -Path (Join-Path $appDir "templates\$AppName") -Force | Out-Null
+    New-Item -ItemType Directory -Path $appDir -Force | Out-Null
 
     Write-TextFile -Path (Join-Path $appDir "services.py") -Content @'
 """Logique d'ecriture (couche service)."""
@@ -2140,14 +2321,41 @@ urlpatterns = [
 ]
 "@
 
-    Write-TextFile -Path (Join-Path $appDir "views.py") -Content @"
+    if ($HasFrontend) {
+        # UI produit servie par Next.js : la racine Django renvoie une info API (pas de template).
+        Write-TextFile -Path (Join-Path $appDir "views.py") -Content @"
+from __future__ import annotations
+
+from django.http import HttpRequest, JsonResponse
+from django.views import View
+
+
+class HomeView(View):
+    '''Racine de l'API Django (UI produit servie par Next.js sur le port 3000).
+
+    MRO:
+    1. View.get -> JsonResponse d'information API
+    '''
+
+    def get(self, request: HttpRequest) -> JsonResponse:
+        return JsonResponse(
+            {
+                "service": "$AppName",
+                "frontend": "http://localhost:3000",
+                "health": "/api/health/",
+            }
+        )
+"@
+    } else {
+        New-Item -ItemType Directory -Path (Join-Path $appDir "templates\$AppName") -Force | Out-Null
+        Write-TextFile -Path (Join-Path $appDir "views.py") -Content @"
 from __future__ import annotations
 
 from django.views.generic import TemplateView
 
 
 class HomeView(TemplateView):
-    '''Page d'accueil minimale (legacy template).
+    '''Page d'accueil (template Django).
 
     MRO:
     1. TemplateView.get -> rendu template $AppName/home.html
@@ -2156,20 +2364,19 @@ class HomeView(TemplateView):
     template_name = "$AppName/home.html"
 "@
 
-    Write-TextFile -Path (Join-Path $appDir "templates\$AppName\home.html") -Content @'
+        $homeHtml = @"
 {% extends "base.html" %}
 {% block title %}Accueil{% endblock %}
 {% block content %}
   <main class="page-home">
     <header class="page-home__hero">
-      <p class="page-home__eyebrow">Django + uv + Next.js</p>
+      <p class="page-home__eyebrow">$homeEyebrow</p>
       <h1 class="page-home__title">Bienvenue sur votre application</h1>
       <p class="page-home__lead">
-        UI produit et administration via Next.js. API metier exposee par Django/DRF.
+        $homeLead
       </p>
       <div class="page-home__actions">
-        <a class="btn btn--primary" href="http://localhost:3000/admin">Administration</a>
-        <a class="btn btn--secondary" href="http://localhost:3000/login">Connexion</a>
+$homeActions
       </div>
     </header>
     <section class="page-home__grid">
@@ -2178,27 +2385,35 @@ class HomeView(TemplateView):
         <p class="page-home__card-text">Service Layer, DRF et migrations ORM.</p>
       </article>
       <article class="page-home__card">
-        <h2 class="page-home__card-title">Admin custom</h2>
-        <p class="page-home__card-text">Registry, schema et CRUD (roadmap V1-V3).</p>
+        <h2 class="page-home__card-title">$card2Title</h2>
+        <p class="page-home__card-text">$card2Text</p>
       </article>
     </section>
   </main>
 {% endblock %}
-'@
+"@
+        Write-TextFile -Path (Join-Path $appDir "templates\$AppName\home.html") -Content $homeHtml
+    }
 }
 
 function New-CoreModels {
     param(
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$AppName
+        [Parameter(Mandatory)][string]$AppName,
+        [bool]$HasCustomAdmin = $true
     )
+    $adminHint = if ($HasCustomAdmin) {
+        "L'admin DataStudio expose par defaut ``auth.User`` (voir ``apps.admin_panel.registry``)."
+    } else {
+        "Utilisateurs geres via ``django.contrib.admin`` (``/django-admin/``)."
+    }
     $modelsPath = Join-Path $Root "apps\$AppName\models.py"
     Write-TextFile -Path $modelsPath -Content @"
 from __future__ import annotations
 
 """Modeles metier de l'app $AppName.
 
-L'admin DataStudio expose par defaut ``auth.User`` (voir ``apps.admin_panel.registry``).
+$adminHint
 Ajoutez ici vos modeles metier supplementaires.
 """
 "@
@@ -3467,10 +3682,6 @@ function New-NextJsFrontend {
     Write-TextFile -Path (Join-Path $fe ".npmrc") -Content @'
 # Docker / CI : pas de prompt interactif (purge node_modules)
 confirm-modules-purge=false
-# pnpm 10+ : autoriser les scripts de build requis par Next.js
-only-built-dependencies[]=@parcel/watcher
-only-built-dependencies[]=sharp
-only-built-dependencies[]=unrs-resolver
 '@
 
     New-Item -ItemType Directory -Path (Join-Path $fe "public") -Force | Out-Null
@@ -3639,6 +3850,10 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 # API_INTERNAL_URL=http://host.docker.internal:8000
 "@
 
+    Write-TextFile -Path (Join-Path $fe ".env.local") -Content @"
+NEXT_PUBLIC_API_URL=http://localhost:8000
+"@
+
     Write-TextFile -Path (Join-Path $fe ".gitignore") -Content @'
 node_modules/
 .next/
@@ -3687,13 +3902,31 @@ EXPOSE 3000
 CMD ["node", "server.js"]
 '@
 
+    $feScripts = Join-Path $fe "scripts"
+    New-Item -ItemType Directory -Path $feScripts -Force | Out-Null
+    Write-TextFile -Path (Join-Path $feScripts "install-deps.cmd") -Content @'
+@echo off
+setlocal
+cd /d "%~dp0.."
+set CI=true
+set FORCE_COLOR=0
+set NO_COLOR=1
+if exist "%ProgramFiles%\nodejs\pnpm.cmd" (
+  "%ProgramFiles%\nodejs\pnpm.cmd" install --reporter=append-only
+) else (
+  call pnpm.cmd install --reporter=append-only
+)
+exit /b %ERRORLEVEL%
+'@
+
     New-AdminFrontendScaffold -FeRoot $fe -AppName $AppName
 }
 
 function New-DockerStack {
     param(
         [Parameter(Mandatory)][string]$Root,
-        [int]$PostgresHostPort = 5433
+        [int]$PostgresHostPort = 5433,
+        [bool]$HasFrontend = $true
     )
 
     $scriptsDir = Join-Path $Root "scripts"
@@ -3740,6 +3973,7 @@ fi
 exec uv run python manage.py runserver 0.0.0.0:8000
 '@
 
+    if ($HasFrontend) {
     $feScriptsDir = Join-Path $Root "frontend\scripts"
     New-Item -ItemType Directory -Path $feScriptsDir -Force | Out-Null
     Write-TextFile -Path (Join-Path $feScriptsDir "docker-entrypoint-dev.sh") -Content @'
@@ -3782,6 +4016,7 @@ corepack enable
 corepack prepare pnpm@9.15.9 --activate
 exec pnpm "$@"
 '@
+    }
 
     Write-TextFile -Path (Join-Path $scriptsDir "docker-web-prod.sh") -Content @'
 #!/bin/sh
@@ -3836,6 +4071,9 @@ frontend/.next/
 .env
 '@
 
+    $corsOrigins = Get-CorsOrigins -HasFrontend $HasFrontend
+
+    # Bloc unique @' : evite la fusion db: + image: sur une ligne (concat @" + @').
     $composeDev = @'
 services:
   db:
@@ -3867,10 +4105,6 @@ services:
       DJANGO_ENV: dev
       DJANGO_SETTINGS_MODULE: config.settings
       DJANGO_SECRET_KEY: dev-docker-only
-      # Superuser auto dans PostgreSQL Docker (optionnel) :
-      # DJANGO_SUPERUSER_USERNAME: admin
-      # DJANGO_SUPERUSER_PASSWORD: admin
-      # DJANGO_SUPERUSER_EMAIL: admin@local.test
       DJANGO_USE_POSTGRES: "1"
       DJANGO_DB_ENGINE: django.db.backends.postgresql
       DJANGO_DB_NAME: app
@@ -3878,7 +4112,7 @@ services:
       DJANGO_DB_PASSWORD: dev
       DJANGO_DB_HOST: db
       DJANGO_DB_PORT: "5432"
-      CORS_ALLOWED_ORIGINS: http://localhost:3000
+      CORS_ALLOWED_ORIGINS: CORS_ORIGINS_PLACEHOLDER
     ports:
       - "8000:8000"
     depends_on:
@@ -3896,6 +4130,9 @@ services:
       start_period: 120s
     restart: unless-stopped
 
+'@
+    if ($HasFrontend) {
+        $composeDev += @'
   frontend:
     build:
       context: ./frontend
@@ -3920,12 +4157,26 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+'@
+    }
+
+    if ($HasFrontend) {
+        $composeDev += @'
 volumes:
   pgdata:
   backend_venv:
   frontend_next:
 '@
+    } else {
+        $composeDev += @'
+volumes:
+  pgdata:
+  backend_venv:
+'@
+    }
+
     $composeDev = $composeDev -replace 'POSTGRES_HOST_PORT', [string]$PostgresHostPort
+    $composeDev = $composeDev -replace 'CORS_ORIGINS_PLACEHOLDER', $corsOrigins
 
     Write-TextFile -Path (Join-Path $Root ".gitattributes") -Content @'
 # Scripts shell : LF obligatoire pour Docker/Linux
@@ -3934,7 +4185,8 @@ volumes:
 
     Write-TextFile -Path (Join-Path $Root "docker-compose.yml") -Content $composeDev
 
-    Write-TextFile -Path (Join-Path $Root "docker-compose.prod.yml") -Content @'
+    if ($HasFrontend) {
+        $composeProd = @'
 services:
   db:
     image: postgres:16-alpine
@@ -3998,10 +4250,64 @@ services:
 volumes:
   pgdata:
 '@
+    } else {
+        $composeProd = @'
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod
+    command: ["/bin/sh", "scripts/docker-web-prod.sh"]
+    environment:
+      DJANGO_ENV: prod
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?required}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?required}
+      DJANGO_USE_POSTGRES: "1"
+      DJANGO_DB_ENGINE: django.db.backends.postgresql
+      DJANGO_DB_NAME: ${POSTGRES_DB:-app}
+      DJANGO_DB_USER: ${POSTGRES_USER:-app}
+      DJANGO_DB_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      DJANGO_DB_HOST: db
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://example.com}
+    depends_on:
+      db:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "uv run python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/', timeout=3)\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+volumes:
+  pgdata:
+'@
+    }
+
+    Write-TextFile -Path (Join-Path $Root "docker-compose.prod.yml") -Content $composeProd
 }
 
 function New-QualityTooling {
-    param([Parameter(Mandatory)][string]$Root)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [bool]$HasCustomAdmin = $true
+    )
 
     $testsDir = Join-Path $Root "tests"
     New-Item -ItemType Directory -Path $testsDir -Force | Out-Null
@@ -4045,7 +4351,8 @@ python_files = tests.py test_*.py *_tests.py
 addopts = -ra
 '@
 
-    Write-TextFile -Path (Join-Path $testsDir "test_admin_api.py") -Content @'
+    if ($HasCustomAdmin) {
+        Write-TextFile -Path (Join-Path $testsDir "test_admin_api.py") -Content @'
 """Tests API admin panel (auth superuser)."""
 
 import pytest
@@ -4116,12 +4423,27 @@ def test_login_accepts_superuser(api_client, superuser) -> None:
     assert "access" in data
     assert data["user"]["is_superuser"] is True
 '@
+    } else {
+        Write-TextFile -Path (Join-Path $testsDir "test_health.py") -Content @'
+"""Tests sante API sans admin custom."""
+
+from django.test import Client
+
+
+def test_health_endpoint_ok() -> None:
+    response = Client().get("/api/health/")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+'@
+    }
 }
 
 function New-CursorProjectRules {
     param(
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$AppName
+        [Parameter(Mandatory)][string]$AppName,
+        [bool]$HasCustomAdmin = $true,
+        [bool]$HasFrontend = $true
     )
 
     $cursorDir = Join-Path $Root ".cursor"
@@ -4129,6 +4451,53 @@ function New-CursorProjectRules {
     $skillsDir = Join-Path $cursorDir "skills"
     New-Item -ItemType Directory -Path $rulesDir -Force | Out-Null
     New-Item -ItemType Directory -Path $skillsDir -Force | Out-Null
+
+    $djangoUiRows = if ($HasFrontend) {
+        ""
+    } else {
+        "| ``templates/`` | Templates Django (UI produit) |`n| ``static/scss/`` | SCSS 7-1 (UI produit) |`n"
+    }
+    $feRow = if ($HasFrontend) {
+        "| ``frontend/`` | Next.js App Router + admin custom ``/admin`` (UI produit) |`n"
+    } else {
+        ""
+    }
+    $adminPanelRow = if ($HasCustomAdmin) {
+        "| ``apps/admin_panel/`` | Registry whitelist + API DRF ``/api/admin/`` |`n"
+    } else {
+        ""
+    }
+    $feSection = if ($HasFrontend) {
+        @"
+
+## Front Next.js
+- UI produit dans ``frontend/`` : ``/admin``, ``/login`` (Flat High-End, SCSS + ``:root``).
+- Django = API pure : aucun ``templates/`` ni ``static/scss`` custom (l'admin Django sert ses propres statics).
+- Pas de HTMX. Pas de logique metier cote client.
+- ``NEXT_PUBLIC_API_URL`` (navigateur) ; ``API_INTERNAL_URL`` (RSC Docker, defaut ``http://web:8000``).
+"@
+    } else {
+        @"
+
+## UI (Django uniquement)
+- Pas de dossier ``frontend/`` : pages templates + SCSS sous ``templates/`` et ``static/scss/``.
+"@
+    }
+    $adminSection = if ($HasCustomAdmin) {
+        @"
+
+## Admin custom (admin_panel)
+- API ``/api/admin/`` + auth JWT ``/api/auth/`` pour DataStudio Next.js.
+- Registry whitelist, schema, CRUD, requetes SQL lecture seule.
+"@
+    } else {
+        @"
+
+## Administration
+- ``django.contrib.admin`` sur ``/django-admin/`` (active en dev par defaut).
+- Pas de ``apps/admin_panel`` ni d'API ``/api/admin/``.
+"@
+    }
 
     $structure = @"
 # Structure applicative
@@ -4138,25 +4507,38 @@ function New-CursorProjectRules {
 |--------|------|
 | ``config/`` | Settings Django (dev/qua/prod), urls, wsgi/asgi |
 | ``apps/`` | Apps metier (Service Layer strict) |
-| ``templates/`` | Templates Django legacy minimaux |
-| ``static/scss/`` | SCSS 7-1 (pages internes optionnelles) |
-| ``frontend/`` | Next.js App Router + admin custom ``/admin`` |
-| ``apps/admin_panel/`` | Registry whitelist + API DRF ``/api/admin/`` |
-| ``tests/`` | Pytest |
+$djangoUiRows$feRow$adminPanelRow| ``tests/`` | Pytest |
 | ``docker-compose.yml`` / ``docker-compose.prod.yml`` | Dev local / prod |
 
 ## Apps Django
 | App | Role |
 |-----|------|
 | ``apps.$AppName`` | App metier (modeles custom ; User = ``auth.User``) |
-| ``apps.admin_panel`` | Admin custom : registry, schema, stubs CRUD API |
-
-## Front Next.js
-- UI admin principale : ``/admin``, ``/login`` (Flat High-End, SCSS + ``:root``).
-- Pas de HTMX. Pas de logique metier cote client.
-- ``NEXT_PUBLIC_API_URL`` (navigateur) ; ``API_INTERNAL_URL`` (RSC Docker, defaut ``http://web:8000``).
+$feSection$adminSection
 "@
     Write-TextFile -Path (Join-Path $cursorDir "app-structure.md") -Content $structure
+
+    $umlFrontend = if ($HasFrontend) {
+        @"
+package "frontend" {
+  [App Router]
+  [admin UI]
+}
+[frontend] --> [serializers] : HTTP JSON
+"@
+    } else {
+        ""
+    }
+    $umlAdminPanel = if ($HasCustomAdmin) {
+        @"
+  package "admin_panel" {
+    [registry]
+    [API /api/admin/]
+  }
+"@
+    } else {
+        ""
+    }
 
     $uml = @"
 @startuml
@@ -4174,24 +4556,24 @@ package "apps" {
   package "auth" {
     [User]
   }
-  package "admin_panel" {
-    [registry]
-    [API /api/admin/]
-  }
+$umlAdminPanel
 }
-package "frontend" {
-  [App Router]
-  [admin UI]
-}
+$umlFrontend
 database "PostgreSQL" as db
 [apps] --> db : ORM
-[frontend] --> [serializers] : HTTP JSON
 @enduml
 "@
     Write-TextFile -Path (Join-Path $cursorDir "app-architecture.uml") -Content $uml
 
+    $agentsTitle = if ($HasFrontend) {
+        "monorepo Django + Next.js"
+    } elseif ($HasCustomAdmin) {
+        "Django + admin_panel API (sans Next.js)"
+    } else {
+        "projet Django (admin natif, sans Next.js)"
+    }
     Write-TextFile -Path (Join-Path $cursorDir "AGENTS.md") -Content @"
-# Agents Cursor - monorepo Django + Next.js
+# Agents Cursor - $agentsTitle
 
 ## Lead par defaut
 **@ProjectManager** - plan d'action, dispatch, Definition of Done.
@@ -4299,109 +4681,147 @@ function New-ProjectReadme {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppName,
+        [bool]$HasCustomAdmin,
         [bool]$HasFrontend,
         [bool]$HasDocker
     )
     $fe = if ($HasFrontend) { @"
 
 ## Frontend (Next.js)
-``````bash
+
+L'init **ne demarre pas** Next.js : le port 3000 reste ferme tant que ``pnpm dev`` n'est pas lance.
+
+``````powershell
+# Option A : deux fenetres automatiques (recommande Windows)
+.\scripts\dev-local.ps1
+
+# Option B : manuel (2 terminaux)
 cd frontend
-pnpm install
+pnpm install   # deja fait a l'init si Node/pnpm disponible
 pnpm dev
 ``````
+
+Puis ouvrir http://127.0.0.1:3000 (ou http://localhost:3000).
 "@ } else { "" }
 
-    $dk = if ($HasDocker) { @"
+    $quickStart = if ($HasFrontend) {
+        @"
 
-## Docker (dev - runserver + Next dev)
+``````powershell
+cd <racine_projet>
+uv sync
+uv run python manage.py migrate
+
+# Demarrer backend + frontend (obligatoire pour le port 3000) :
+.\scripts\dev-local.ps1
+``````
+"@
+    } else {
+        @"
+
+``````powershell
+cd <racine_projet>
+uv sync
+uv run python manage.py migrate
+uv run python manage.py runserver
+``````
+"@
+    }
+
+    $projectKind = if ($HasFrontend) { "Monorepo Django + uv + Next.js" } else { "Projet Django + uv (sans Next.js)" }
+    $dk = if ($HasDocker) {
+        if ($HasFrontend) {
+            @"
+
+## Docker (dev - db + web + frontend)
 ``````bash
 docker compose up --build
 ``````
 
 Production : ``docker compose -f docker-compose.prod.yml up --build``
-"@ } else { "" }
+"@
+        } else {
+            @"
 
-    $readme = @"
-# Monorepo Django + uv + Next.js$(if ($HasDocker) { " + Docker" })
-
-## Demarrage rapide
-
-``````powershell
-# Generer un projet (script)
-powershell -ExecutionPolicy Bypass -File .\New-DjangoUvProject.ps1 -NewFolder mon_projet -NoInteractive
-
-cd mon_projet
-uv sync
-uv run python manage.py migrate
-``````
-
-## Docker (dev)
-
-``````powershell
-$env:DOCKER_BUILDKIT = "1"
+## Docker (dev - db + web Django uniquement)
+``````bash
 docker compose up --build
 ``````
 
-Les paquets frontend sont installes au **build** de l'image (``pnpm install --frozen-lockfile`` si ``pnpm-lock.yaml`` present - genere a l'init).
-Le conteneur demarre directement sur ``pnpm dev`` (pas de reinstall au ``up``).
-Le volume anonyme ``/app/node_modules`` conserve les deps de l'image (demarrage rapide).
-Apres modification de ``package.json`` : ``docker compose build frontend --no-cache``.
+- API : http://localhost:8000
+- Admin Django (dev) : http://localhost:8000/django-admin/
 
-Depannage :
-- ``web`` en ``Restarting`` : ``docker compose logs web`` (souvent PostgreSQL : ``failed to resolve host 'db'``).
-- Port 5432 deja utilise sous Windows : Postgres Docker mappe sur **5433** (hote) ; arreter un Postgres local ou changer le mapping.
-- ``authentification par mot de passe echouee`` pour ``app`` : le port 5433 n'est pas le bon Postgres, ou volume obsolete. ``docker compose down -v`` puis ``docker compose up -d db``. Mot de passe attendu : ``dev`` (voir ``.env`` et ``POSTGRES_PASSWORD`` dans compose).
-- ``fetch failed`` / ``ECONNREFUSED`` sur ``/admin`` : ``curl http://localhost:8000/api/health/`` ; en full Docker ``API_INTERNAL_URL`` doit etre ``http://web:8000`` (defaut compose). Hybride (Django sur l'hote) : ``API_INTERNAL_URL=http://host.docker.internal:8000``.
-- ``ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF`` : pnpm 9.15.9 est impose (``packageManager`` + entrypoint). Ajout de paquet dans le conteneur : ``docker compose exec frontend sh scripts/pnpm-docker.sh add framer-motion`` (met a jour ``package.json`` + ``pnpm-lock.yaml`` sur l'hote).
-- ``app-paths-manifest.json`` ENOENT : supprimer ``frontend/.next`` sur l'hote, volume ``frontend_next`` dans compose, puis ``docker compose up --build``.
-- ``ERR_PNPM_NO_LOCKFILE`` : ``cd frontend && pnpm install`` (cree ``pnpm-lock.yaml``), puis ``docker compose build frontend``.
-- ``Cannot resolve lucide-react`` / prompt pnpm purge : ``docker compose down -v`` puis ``docker compose build frontend`` et ``docker compose up`` (volume ``node_modules`` vide ou Windows desync).
-- ``dependency web failed to start`` : ``docker compose logs web`` (PostgreSQL, migrations, healthcheck).
+Production : ``docker compose -f docker-compose.prod.yml up --build``
+"@
+        }
+    } else { "" }
+
+    $urlsBlock = if ($HasFrontend) {
+        @"
 
 - Backend : http://localhost:8000
 - Frontend : http://localhost:3000
-- Admin Next.js : http://localhost:3000/admin
+- Admin DataStudio : http://localhost:3000/admin
 - Login : http://localhost:3000/login (superuser Django uniquement)
+"@
+    } elseif ($HasCustomAdmin) {
+        @"
+
+- API : http://localhost:8000
+- Admin Django (fallback dev) : http://localhost:8000/django-admin/
+- API admin : http://localhost:8000/api/admin/
+"@
+    } else {
+        @"
+
+- API : http://localhost:8000
+- Admin Django : http://localhost:8000/django-admin/
+"@
+    }
+
+    $dockerUpHint = if ($HasFrontend) { "docker compose up          # web + frontend" } else { "docker compose up          # web uniquement" }
+
+    $backendAdminLine = if ($HasCustomAdmin) {
+        "Admin custom : ``apps.admin_panel`` (registry, schema, CRUD API) - modele par defaut ``auth.User``"
+    } else {
+        'Administration : ``django.contrib.admin`` sur ``/django-admin/`` (pas d''admin_panel)'
+    }
+
+    $readme = @"
+# $projectKind$(if ($HasDocker) { " + Docker" })
+
+## Demarrage rapide
+$quickStart
+
+$dk
 
 ## Base de donnees (PostgreSQL)
 
-Avec Docker, le script genere un fichier ``.env`` : Django utilise **PostgreSQL** sur ``localhost:5433`` (meme instance que le service ``db`` du compose).
+Avec Docker, le script genere un fichier ``.env`` : Django utilise **PostgreSQL** sur le port hote mappe (voir ``.env`` / compose).
 
 ``````bash
-docker compose up -d db    # si pas deja demarre
+docker compose up -d db
 uv run python manage.py migrate
 uv run python manage.py createsuperuser
-docker compose up          # web + frontend
+$dockerUpHint
 ``````
 
-Sans fichier ``.env`` / sans ``DJANGO_USE_POSTGRES=1`` : fallback SQLite (``db.sqlite3``).
+Sans ``DJANGO_USE_POSTGRES=1`` : fallback SQLite (``db.sqlite3``).
 
-## Compte superuser (obligatoire pour /admin)
+$urlsBlock
 
-Cree a l'init (etape Superuser) ou via ``createsuperuser`` - compte **superuser** requis pour ``/login``.
+## Compte superuser
+
+Cree a l'init (etape Superuser) ou via ``createsuperuser`` - compte **superuser** requis$(if ($HasFrontend) { " pour ``/login``" } else { " pour ``/django-admin/``" }).
 
 ## Backend
 
-App metier : ``apps.$AppName`` ; admin DataStudio : ``auth.User`` par defaut
-Admin API : ``apps.admin_panel`` - registry whitelist, schema, stubs CRUD
+App metier : ``apps.$AppName``
+$backendAdminLine
 
-Django ``/django-admin/`` : fallback **dev uniquement** (``DJANGO_ADMIN_ENABLED``).
-Desactive en prod dans ``config/settings/prod.py``.
-
-**Structure BDD** : ``models.py`` + migrations uniquement (pas de DDL via UI admin).
+**Structure BDD** : ``models.py`` + migrations uniquement.
 
 $fe
-
-## Roadmap parite admin Django
-
-| Phase | Perimetre |
-|-------|-----------|
-| **V1 (scaffold)** | Registry, schema table/global, export Mermaid, pages Next stub, API stubs |
-| **V2** | CRUD reel (list/create/edit/delete), auth, permissions, export SVG |
-| **V3** | Inlines, filtres avances, actions bulk, audit, parite fonctionnelle partielle |
-
-> Ce scaffold ne pretend pas a une parite 100 % avec ``django.contrib.admin``.
 
 ## Cursor
 
@@ -4414,6 +4834,7 @@ function Test-ProjectStructure {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppName,
+        [bool]$ExpectCustomAdmin,
         [bool]$ExpectFrontend,
         [bool]$ExpectDocker
     )
@@ -4426,12 +4847,18 @@ function Test-ProjectStructure {
         "apps\$AppName\services.py",
         "apps\$AppName\selectors.py",
         "apps\$AppName\serializers.py",
-        "apps\admin_panel\registry.py",
-        "apps\admin_panel\urls.py",
-        "apps\admin_panel\views.py",
         ".cursor\AGENTS.md",
         ".cursor\rules\00-project-stack.mdc"
     )
+    if ($ExpectCustomAdmin) {
+        $required += @(
+            "apps\admin_panel\registry.py",
+            "apps\admin_panel\urls.py",
+            "apps\admin_panel\views.py"
+        )
+    } else {
+        $required += "apps\$AppName\admin.py"
+    }
     if ($ExpectFrontend) {
         $lockFile = Join-Path $Root "frontend\pnpm-lock.yaml"
         if ($ExpectDocker -and -not (Test-Path -LiteralPath $lockFile)) {
@@ -4455,6 +4882,11 @@ function Test-ProjectStructure {
             "frontend\src\styles\admin\data-studio.scss",
             "frontend\next.config.ts"
         )
+    } else {
+        $required += @(
+            "templates\base.html",
+            "static\scss\main.scss"
+        )
     }
     if ($ExpectDocker) {
         $required += @(
@@ -4462,9 +4894,11 @@ function Test-ProjectStructure {
             "docker-compose.yml",
             "docker-compose.prod.yml",
             "scripts\docker-web-dev.sh",
-            "scripts\docker-web-prod.sh",
-            "frontend\scripts\docker-entrypoint-dev.sh"
+            "scripts\docker-web-prod.sh"
         )
+        if ($ExpectFrontend) {
+            $required += "frontend\scripts\docker-entrypoint-dev.sh"
+        }
     }
     foreach ($rel in $required) {
         $full = Join-Path $Root $rel
@@ -4480,23 +4914,12 @@ function Get-PnpmCliVersion {
     $pnpmPath = Resolve-NodeToolPath -Name "pnpm"
     if (-not $pnpmPath) { return $null }
     try {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $argString = "--version"
-        $ext = [System.IO.Path]::GetExtension($pnpmPath).ToLowerInvariant()
-        if (($IsWindows -or $env:OS -eq "Windows_NT") -and $ext -in @(".cmd", ".bat")) {
-            $psi.FileName = if ([string]::IsNullOrWhiteSpace($env:ComSpec)) { "cmd.exe" } else { $env:ComSpec }
-            $psi.Arguments = "/d /s /c `"`"$pnpmPath`" $argString`""
-        } else {
-            $psi.FileName = $pnpmPath
-            $psi.Arguments = $argString
-        }
-        $psi.WorkingDirectory = $WorkingDirectory
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.CreateNoWindow = $true
+        $psi = New-CliProcessStartInfo -ExePath $pnpmPath -ArgumentString "--version" -WorkingDirectory $WorkingDirectory
         $p = [System.Diagnostics.Process]::Start($psi)
-        $null = $p.WaitForExit(15000)
+        if (-not $p.WaitForExit(15000)) {
+            try { $p.Kill() } catch {}
+            return $null
+        }
         if ($p.ExitCode -ne 0) { return $null }
         return ($p.StandardOutput.ReadToEnd().Trim())
     } catch {
@@ -4507,16 +4930,22 @@ function Get-PnpmCliVersion {
 function Ensure-PnpmVersion {
     param([Parameter(Mandatory)][string]$WorkingDirectory)
 
-    if ((Get-PnpmCliVersion -WorkingDirectory $WorkingDirectory) -eq "9.15.9") {
-        return $true
+    $pnpmPath = Get-PreferredNodeCmdPath -Name "pnpm"
+    if ($pnpmPath) {
+        $ver = Get-PnpmCliVersion -WorkingDirectory $WorkingDirectory
+        if ($ver) {
+            Write-Host "     pnpm detecte : $ver" -ForegroundColor DarkGray
+            return $true
+        }
     }
 
-    if (Resolve-NodeToolPath -Name "corepack") {
+    $corepackPath = Get-PreferredNodeCmdPath -Name "corepack"
+    if ($corepackPath) {
         try {
-            # Windows : "corepack enable" echoue souvent ; "prepare" suffit en general.
-            Invoke-CheckedCommand -Exe "corepack" -Arguments @("prepare", "pnpm@9.15.9", "--activate") `
-                -WorkingDirectory $WorkingDirectory -Quiet -TimeoutSeconds 120
-            if ((Get-PnpmCliVersion -WorkingDirectory $WorkingDirectory) -eq "9.15.9") {
+            $corepackQuoted = '"' + $corepackPath.Replace('"', '""') + '"'
+            Invoke-CmdBatchLogged -WorkingDirectory $WorkingDirectory `
+                -CommandLine "$corepackQuoted prepare pnpm@9.15.9 --activate" -TimeoutSeconds 120 -Quiet
+            if (Get-PnpmCliVersion -WorkingDirectory $WorkingDirectory) {
                 return $true
             }
         } catch {
@@ -4524,11 +4953,13 @@ function Ensure-PnpmVersion {
         }
     }
 
-    if (Resolve-NodeToolPath -Name "npm") {
+    $npmPath = Get-PreferredNodeCmdPath -Name "npm"
+    if ($npmPath) {
         try {
-            Invoke-CheckedCommand -Exe "npm" -Arguments @("install", "-g", "pnpm@9.15.9") `
-                -WorkingDirectory $WorkingDirectory -Quiet -TimeoutSeconds 180
-            if ((Get-PnpmCliVersion -WorkingDirectory $WorkingDirectory) -eq "9.15.9") {
+            $npmQuoted = '"' + $npmPath.Replace('"', '""') + '"'
+            Invoke-CmdBatchLogged -WorkingDirectory $WorkingDirectory `
+                -CommandLine "$npmQuoted install -g pnpm@9.15.9" -TimeoutSeconds 180 -Quiet
+            if (Get-PnpmCliVersion -WorkingDirectory $WorkingDirectory) {
                 return $true
             }
         } catch {
@@ -4539,22 +4970,85 @@ function Ensure-PnpmVersion {
     return $false
 }
 
+function New-DevLocalScript {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [bool]$HasDocker = $true
+    )
+
+    $scriptsDir = Join-Path $Root "scripts"
+    New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+
+    $devScript = @'
+# Demarre Django (8000) et Next.js (3000) dans deux fenetres PowerShell.
+# Usage : .\scripts\dev-local.ps1
+$ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent $PSScriptRoot
+$frontend = Join-Path $root 'frontend'
+
+if (-not (Test-Path -LiteralPath (Join-Path $root 'manage.py'))) {
+    Write-Error "manage.py introuvable. Lancez depuis la racine du projet genere."
+}
+if (-not (Test-Path -LiteralPath (Join-Path $frontend 'package.json'))) {
+    Write-Error "frontend/package.json introuvable."
+}
+
+Write-Host 'Demarrage backend (uv run python manage.py runserver)...' -ForegroundColor Cyan
+Start-Process powershell -ArgumentList @(
+    '-NoExit', '-NoProfile', '-Command',
+    ("Set-Location -LiteralPath '" + $root + "'; uv run python manage.py runserver 0.0.0.0:8000")
+)
+
+Write-Host 'Demarrage frontend (pnpm dev)...' -ForegroundColor Cyan
+Start-Process powershell -ArgumentList @(
+    '-NoExit', '-NoProfile', '-Command',
+    ("Set-Location -LiteralPath '" + $frontend + "'; if (Get-Command pnpm -ErrorAction SilentlyContinue) { pnpm dev } else { npm run dev }")
+)
+
+Write-Host ''
+Write-Host 'Serveurs en cours de demarrage :' -ForegroundColor Green
+Write-Host '  Backend  : http://127.0.0.1:8000'
+Write-Host '  Frontend : http://127.0.0.1:3000'
+Write-Host '  Admin    : http://127.0.0.1:3000/admin'
+Write-Host '  Login    : http://127.0.0.1:3000/login'
+Write-Host ''
+Write-Host 'Si le port 3000 reste inaccessible, verifiez la fenetre frontend (erreur pnpm/node).'
+'@
+    if ($HasDocker) {
+        $devScript += @'
+
+# Alternative Docker (db + web + frontend) :
+#   docker compose up --build
+# Puis http://127.0.0.1:3000 (attendre que le service frontend soit healthy)
+'@
+    }
+    Write-TextFile -Path (Join-Path $scriptsDir "dev-local.ps1") -Content $devScript
+}
+
 function Install-FrontendDependencies {
-    param([Parameter(Mandatory)][string]$FrontendRoot)
+    param(
+        [Parameter(Mandatory)][string]$FrontendRoot,
+        [int]$TimeoutSeconds = 900
+    )
 
     $lockPath = Join-Path $FrontendRoot "pnpm-lock.yaml"
-    $pnpmArgs = if (Test-Path -LiteralPath $lockPath) {
-        @("install", "--frozen-lockfile")
+    $pnpmArgText = if (Test-Path -LiteralPath $lockPath) {
+        "install --frozen-lockfile --reporter=append-only"
     } else {
-        @("install")
+        "install --reporter=append-only"
     }
 
     $null = Ensure-PnpmVersion -WorkingDirectory $FrontendRoot
 
-    if (Resolve-NodeToolPath -Name "pnpm") {
+    $pnpmPath = Get-PreferredNodeCmdPath -Name "pnpm"
+    if ($pnpmPath) {
         try {
-            Write-Host "     pnpm $($pnpmArgs -join ' ') (pnpm 9.15.9, genere pnpm-lock.yaml)..." -ForegroundColor DarkGray
-            Invoke-NativeCli -Exe "pnpm" -Arguments $pnpmArgs -WorkingDirectory $FrontendRoot -Quiet
+            Write-Host "     pnpm $pnpmArgText (via cmd.exe, peut prendre plusieurs minutes)..." -ForegroundColor DarkGray
+            $pnpmQuoted = '"' + $pnpmPath.Replace('"', '""') + '"'
+            Invoke-CmdBatchLogged -WorkingDirectory $FrontendRoot `
+                -CommandLine "$pnpmQuoted $pnpmArgText" -TimeoutSeconds $TimeoutSeconds -Quiet `
+                -ShowProgress -ProgressActivity "Installation dependances Next.js (pnpm)" `
+                -ProgressEstimateSeconds ([math]::Min(600, [math]::Max(180, [int]($TimeoutSeconds / 2))))
             if (-not (Test-Path -LiteralPath $lockPath)) {
                 Write-Host "     Avertissement : pnpm-lock.yaml absent apres install." -ForegroundColor DarkYellow
             }
@@ -4564,17 +5058,23 @@ function Install-FrontendDependencies {
         }
     }
 
-    if (Resolve-NodeToolPath -Name "npm") {
+    $npmPath = Get-PreferredNodeCmdPath -Name "npm"
+    if ($npmPath) {
         try {
-            Write-Host "     npm install (fallback sans pnpm-lock.yaml)..." -ForegroundColor DarkYellow
-            Invoke-NativeCli -Exe "npm" -Arguments @("install") -WorkingDirectory $FrontendRoot -Quiet
+            Write-Host "     npm install (fallback, via cmd.exe)..." -ForegroundColor DarkYellow
+            $npmQuoted = '"' + $npmPath.Replace('"', '""') + '"'
+            Invoke-CmdBatchLogged -WorkingDirectory $FrontendRoot `
+                -CommandLine "$npmQuoted install --no-fund --no-audit --loglevel=error" `
+                -TimeoutSeconds $TimeoutSeconds -Quiet -ShowProgress `
+                -ProgressActivity "Installation dependances Next.js (npm)" `
+                -ProgressEstimateSeconds ([math]::Min(600, [math]::Max(180, [int]($TimeoutSeconds / 2))))
             return "npm"
         } catch {
             Write-Host "     npm install ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
         }
     }
 
-    Write-Host "     Installez les deps : cd frontend && pnpm install (ou laissez Docker builder l'image frontend)." -ForegroundColor DarkYellow
+    Write-Host "     Installez les deps : cd frontend && pnpm install (ou Docker : docker compose up --build)." -ForegroundColor DarkYellow
     return $null
 }
 
@@ -4666,19 +5166,78 @@ try {
     $uvName = (Split-Path -Leaf $root) -replace '[^a-zA-Z0-9_]', '_'
     if ($uvName -match '^[0-9]') { $uvName = "_$uvName" }
 
-    $doFrontend = -not $SkipFrontend.IsPresent
+    $wantsNextJs = $false
+    if ($SkipFrontend.IsPresent -and $UseNextJs.IsPresent) {
+        Write-Host "  Avertissement : -SkipFrontend et -UseNextJs ignores (-SkipFrontend prioritaire)." -ForegroundColor DarkYellow
+        $wantsNextJs = $false
+    } elseif ($SkipFrontend.IsPresent) {
+        $wantsNextJs = $false
+    } elseif ($UseNextJs.IsPresent) {
+        $wantsNextJs = $true
+    } elseif (-not $NoInteractive.IsPresent) {
+        do {
+            $nextAnswer = (Read-Host "Utiliser Next.js pour l'UI DataStudio ? (Y/n)").Trim()
+        } while ($nextAnswer -ne '' -and $nextAnswer -notmatch '^[YyNn]$')
+        if ($nextAnswer -match '^[Nn]$') {
+            $wantsNextJs = $false
+            Write-Host "  Frontend retenu : pas de frontend/" -ForegroundColor Cyan
+        } else {
+            $wantsNextJs = $true
+            Write-Host "  Frontend retenu : Next.js DataStudio (/admin, /login)" -ForegroundColor Cyan
+        }
+    } else {
+        $wantsNextJs = $true
+    }
+
+    $wantsCustomAdmin = $true
+    if ($SkipCustomAdmin.IsPresent -and $UseCustomAdmin.IsPresent) {
+        Write-Host "  Avertissement : -SkipCustomAdmin et -UseCustomAdmin ignores (-SkipCustomAdmin prioritaire)." -ForegroundColor DarkYellow
+        $wantsCustomAdmin = $false
+    } elseif ($SkipCustomAdmin.IsPresent) {
+        $wantsCustomAdmin = $false
+    } elseif ($UseCustomAdmin.IsPresent) {
+        $wantsCustomAdmin = $true
+    } elseif (-not $NoInteractive.IsPresent) {
+        do {
+            $adminAnswer = (Read-Host "Utiliser l'admin custom (admin_panel + API /api/admin/) ? (Y/n)").Trim()
+        } while ($adminAnswer -ne '' -and $adminAnswer -notmatch '^[YyNn]$')
+        if ($adminAnswer -match '^[Nn]$') {
+            $wantsCustomAdmin = $false
+            Write-Host "  Admin retenu : django.contrib.admin (/django-admin/)" -ForegroundColor Cyan
+        } else {
+            Write-Host "  Admin retenu : admin_panel + API /api/admin/" -ForegroundColor Cyan
+        }
+    }
+
+    if ($wantsNextJs -and -not $wantsCustomAdmin) {
+        Write-Host "  Avertissement : Next.js DataStudio consomme l'API /api/admin/ - sans admin custom, /admin ne sera pas fonctionnel." -ForegroundColor DarkYellow
+    }
+
+    $doCustomAdmin = $wantsCustomAdmin
+    $doFrontend = $wantsNextJs
     $doDocker = -not $SkipDocker.IsPresent
 
-    Write-PipelineBanner -Subtitle "App: $AppName | Frontend: $doFrontend | Docker: $doDocker"
+    # Total d'etapes calcule selon les options retenues (barre de progression exacte).
+    # L'etape UI est unique : Next.js OU templates/SCSS Django (deja comptee dans le socle).
+    $script:PipelineTotal = 8  # uv, config, app, UI, cursor, qualite, structure, migrate
+    if ($doCustomAdmin) { $script:PipelineTotal++ }
+    if ($doDocker) { $script:PipelineTotal += 2 }
+    if (-not $SkipCreatesuperuser.IsPresent) { $script:PipelineTotal++ }
+
+    Write-PipelineBanner -Subtitle "App: $AppName | Next.js: $doFrontend | Admin custom: $doCustomAdmin | Docker: $doDocker"
 
     Start-PipelineStep -Title "Environnement uv" -Detail "init + dependances runtime et dev"
     if (-not (Test-Path -LiteralPath (Join-Path $root "pyproject.toml"))) {
         Invoke-UvCommand -Arguments @("init", "--name", $uvName) -WorkingDirectory $root -Quiet
     }
-    Invoke-UvCommand -Arguments @(
-        "add", "django", "djangorestframework", "djangorestframework-simplejwt",
+    $pyDeps = @(
+        "django", "djangorestframework",
         "whitenoise", "django-cors-headers", "gunicorn", "psycopg[binary]"
-    ) -WorkingDirectory $root -Quiet
+    )
+    if ($doCustomAdmin) {
+        $pyDeps += "djangorestframework-simplejwt"
+    }
+    Invoke-UvCommand -Arguments (@("add") + $pyDeps) -WorkingDirectory $root -Quiet
     Invoke-UvCommand -Arguments @(
         "add", "--dev", "ruff", "pytest", "pytest-django", "mypy", "django-stubs"
     ) -WorkingDirectory $root -Quiet
@@ -4687,7 +5246,7 @@ try {
     Complete-PipelineStep -Message "pyproject.toml + uv.lock"
 
     Start-PipelineStep -Title "Configuration Django" -Detail "config/ + settings dev|qua|prod"
-    New-DjangoConfigPackage -Root $root -AppName $AppName
+    New-DjangoConfigPackage -Root $root -AppName $AppName -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend
     Complete-PipelineStep
 
     Start-PipelineStep -Title "Application metier" -Detail "apps/$AppName + Service Layer"
@@ -4701,29 +5260,39 @@ try {
     $appsPyPath = Join-Path $root "apps\$AppName\apps.py"
     if (Test-Path -LiteralPath $appsPyPath) {
         $appsPy = Get-Content -LiteralPath $appsPyPath -Raw -Encoding UTF8
-        $appsPy = $appsPy -replace "name = ['\`"]$AppName['\`"]", "name = `"apps.$AppName`""
+        $appsPy = $appsPy.Replace("name = `"$AppName`"", "name = `"apps.$AppName`"")
+        $appsPy = $appsPy.Replace("name = '$AppName'", "name = `"apps.$AppName`"")
         Write-TextFile -Path $appsPyPath -Content $appsPy
     }
-    New-AppServiceLayer -Root $root -AppName $AppName
-    New-CoreModels -Root $root -AppName $AppName
-    Complete-PipelineStep
-
-    Start-PipelineStep -Title "Admin panel API" -Detail "apps/admin_panel + registry + schema DRF"
-    Invoke-UvCommand -Arguments @(
-        "run", "django-admin", "startapp", "admin_panel", "apps\admin_panel"
-    ) -WorkingDirectory $root -Quiet
-    $panelAppsPy = Join-Path $root "apps\admin_panel\apps.py"
-    if (Test-Path -LiteralPath $panelAppsPy) {
-        $panelApps = Get-Content -LiteralPath $panelAppsPy -Raw -Encoding UTF8
-        $panelApps = $panelApps -replace "name = ['\`"]admin_panel['\`"]", "name = `"apps.admin_panel`""
-        Write-TextFile -Path $panelAppsPy -Content $panelApps
+    New-AppServiceLayer -Root $root -AppName $AppName -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend
+    New-CoreModels -Root $root -AppName $AppName -HasCustomAdmin:$doCustomAdmin
+    if (-not $doCustomAdmin) {
+        New-DjangoNativeAdmin -Root $root -AppName $AppName
     }
-    New-AdminPanelBackend -Root $root -AppName $AppName
     Complete-PipelineStep
 
-    Start-PipelineStep -Title "Templates et assets SCSS" -Detail "7-1 minimal (sans HTMX)"
-    New-Item -ItemType Directory -Path (Join-Path $root "templates") -Force | Out-Null
-    Write-TextFile -Path (Join-Path $root "templates\base.html") -Content @'
+    # UI exclusive : Next.js (frontend/) OU templates + SCSS Django, jamais les deux.
+    if ($doFrontend) {
+        Start-PipelineStep -Title "Frontend Next.js" -Detail "App Router + SCSS tokens (sans Tailwind)"
+        New-NextJsFrontend -Root $root -ProjectSlug $uvName -AppName $AppName
+        New-DevLocalScript -Root $root -HasDocker:$doDocker
+        $pkgMgr = $null
+        if (-not $SkipFrontendDeps.IsPresent) {
+            try {
+                $pkgMgr = Install-FrontendDependencies -FrontendRoot (Join-Path $root "frontend") `
+                    -TimeoutSeconds $CommandTimeoutSeconds
+            } catch {
+                Write-Host "     deps frontend ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
+                $pkgMgr = $null
+            }
+        } else {
+            Write-Host "     (-SkipFrontendDeps) : pas de lockfile - le build Docker frontend sera plus lent." -ForegroundColor DarkYellow
+        }
+        Complete-PipelineStep -Message $(if ($pkgMgr) { "deps $pkgMgr + lockfile + scripts/dev-local.ps1" } else { "squelette Next.js + scripts/dev-local.ps1" })
+    } else {
+        Start-PipelineStep -Title "Templates et assets SCSS" -Detail "7-1 minimal (sans HTMX)"
+        New-Item -ItemType Directory -Path (Join-Path $root "templates") -Force | Out-Null
+        Write-TextFile -Path (Join-Path $root "templates\base.html") -Content @'
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -4744,35 +5313,40 @@ try {
 </body>
 </html>
 '@
-    New-StaticScssLayout -Root $root
-    $contentMd = Join-Path $root "content\markdown"
-    New-Item -ItemType Directory -Path $contentMd -Force | Out-Null
-    Write-TextFile -Path (Join-Path $contentMd ".gitkeep") -Content "`n"
-    Complete-PipelineStep
+        New-StaticScssLayout -Root $root
+        $contentMd = Join-Path $root "content\markdown"
+        New-Item -ItemType Directory -Path $contentMd -Force | Out-Null
+        Write-TextFile -Path (Join-Path $contentMd ".gitkeep") -Content "`n"
+        Complete-PipelineStep
+    }
 
-    if ($doFrontend) {
-        Start-PipelineStep -Title "Frontend Next.js" -Detail "App Router + SCSS tokens (sans Tailwind)"
-        New-NextJsFrontend -Root $root -ProjectSlug $uvName -AppName $AppName
-        $pkgMgr = $null
-        if (-not $SkipFrontendDeps.IsPresent) {
-            $pkgMgr = Install-FrontendDependencies -FrontendRoot (Join-Path $root "frontend")
-        } else {
-            Write-Host "     (-SkipFrontendDeps) : pas de lockfile - le build Docker frontend sera plus lent." -ForegroundColor DarkYellow
+    if ($doCustomAdmin) {
+        Start-PipelineStep -Title "Admin panel API" -Detail "apps/admin_panel + registry + schema DRF"
+        Invoke-UvCommand -Arguments @(
+            "run", "django-admin", "startapp", "admin_panel", "apps\admin_panel"
+        ) -WorkingDirectory $root -Quiet
+        $panelAppsPy = Join-Path $root "apps\admin_panel\apps.py"
+        if (Test-Path -LiteralPath $panelAppsPy) {
+            $panelApps = Get-Content -LiteralPath $panelAppsPy -Raw -Encoding UTF8
+            $panelApps = $panelApps.Replace('name = "admin_panel"', 'name = "apps.admin_panel"')
+            $panelApps = $panelApps.Replace("name = 'admin_panel'", 'name = "apps.admin_panel"')
+            Write-TextFile -Path $panelAppsPy -Content $panelApps
         }
-        Complete-PipelineStep -Message $(if ($pkgMgr) { "deps $pkgMgr + lockfile" } else { "squelette Next.js" })
+        New-AdminPanelBackend -Root $root -AppName $AppName
+        Complete-PipelineStep
     } else {
-        Write-Host "     (SkipFrontend)" -ForegroundColor DarkYellow
+        Write-Host "     (admin custom desactive - django.contrib.admin)" -ForegroundColor DarkYellow
     }
 
     if ($doDocker) {
         Start-PipelineStep -Title "Docker" -Detail "Dockerfile + compose dev/prod"
         $postgresHostPort = Find-AvailablePostgresHostPort
         Write-Host "     Port PostgreSQL hote : $postgresHostPort" -ForegroundColor DarkGray
-        New-DockerStack -Root $root -PostgresHostPort $postgresHostPort
+        New-DockerStack -Root $root -PostgresHostPort $postgresHostPort -HasFrontend:$doFrontend
         Complete-PipelineStep
 
         Start-PipelineStep -Title "PostgreSQL (.env)" -Detail "base Django unique hote + Docker"
-        Write-ProjectDotEnvForDocker -Root $root -PostgresHostPort $postgresHostPort
+        Write-ProjectDotEnvForDocker -Root $root -PostgresHostPort $postgresHostPort -HasFrontend:$doFrontend
         try {
             Start-ComposeDatabaseService -Root $root -TimeoutSeconds 90
             $pgPortMsg = Get-ProjectPostgresHostPort -Root $root
@@ -4787,20 +5361,30 @@ try {
     }
 
     Start-PipelineStep -Title "Regles Cursor et skills" -Detail "AGENTS.md, STACK.md, rule MDC"
-    New-CursorProjectRules -Root $root -AppName $AppName
+    New-CursorProjectRules -Root $root -AppName $AppName -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend
     Complete-PipelineStep
 
     Start-PipelineStep -Title "Qualite et documentation" -Detail "pytest, ruff, README, .gitignore"
-    New-QualityTooling -Root $root
+    New-QualityTooling -Root $root -HasCustomAdmin:$doCustomAdmin
     New-RootGitignore -Root $root
-    New-ProjectReadme -Root $root -AppName $AppName -HasFrontend $doFrontend -HasDocker $doDocker
+    New-ProjectReadme -Root $root -AppName $AppName -HasCustomAdmin $doCustomAdmin -HasFrontend $doFrontend -HasDocker $doDocker
+    $corsExample = Get-CorsOrigins -HasFrontend $doFrontend
+    $nextEnvBlock = if ($doFrontend) {
+        @"
+
+# Next.js (frontend/.env.local)
+# NEXT_PUBLIC_API_URL=http://localhost:8000
+"@
+    } else {
+        ""
+    }
     Write-TextFile -Path (Join-Path $root ".env.example") -Content @"
 # Copier vers .env (ne jamais committer)
 
 DJANGO_SETTINGS_MODULE=config.settings
 DJANGO_ENV=dev
 DJANGO_SECRET_KEY=change-me
-CORS_ALLOWED_ORIGINS=http://localhost:3000
+CORS_ALLOWED_ORIGINS=$corsExample
 
 # Superuser (init locale ou variables lues par docker-compose service web) :
 # DJANGO_SUPERUSER_USERNAME=admin
@@ -4817,14 +5401,12 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
 # DJANGO_DB_PASSWORD=
 # DJANGO_DB_HOST=localhost
 # DJANGO_DB_PORT=5432
-
-# Next.js (frontend/.env.local)
-# NEXT_PUBLIC_API_URL=http://localhost:8000
+$nextEnvBlock
 "@
     Complete-PipelineStep
 
     Start-PipelineStep -Title "Verification structure" -Detail "fichiers obligatoires"
-    Test-ProjectStructure -Root $root -AppName $AppName -ExpectFrontend $doFrontend -ExpectDocker $doDocker
+    Test-ProjectStructure -Root $root -AppName $AppName -ExpectCustomAdmin $doCustomAdmin -ExpectFrontend $doFrontend -ExpectDocker $doDocker
     Complete-PipelineStep
 
     Start-PipelineStep -Title "Migrations Django" -Detail "migrate initiale automatique"
@@ -4853,7 +5435,7 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
             } catch {
                 throw @"
 PostgreSQL indisponible pour les migrations : $($_.Exception.Message)
-Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v && docker compose up -d db
+Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v puis docker compose up -d db
 "@
             }
         }
@@ -4862,7 +5444,14 @@ Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v &&
     }
 
     if (-not $SkipCreatesuperuser.IsPresent) {
-        Start-PipelineStep -Title "Superuser Django" -Detail "createsuperuser pour /admin"
+        $suDetail = if ($doFrontend) {
+            "createsuperuser pour /login Next.js"
+        } elseif ($doCustomAdmin) {
+            "createsuperuser pour API admin + /django-admin/"
+        } else {
+            "createsuperuser pour /django-admin/"
+        }
+        Start-PipelineStep -Title "Superuser Django" -Detail $suDetail
         try {
             Invoke-DjangoCreatesuperuser -Root $root -NoInteractive:$NoInteractive.IsPresent
             $suMsg = if (Test-ProjectDotEnvUsesPostgres -Root $root) {
@@ -4880,7 +5469,7 @@ Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v &&
         Write-Host "     (-SkipCreatesuperuser)" -ForegroundColor DarkYellow
     }
 
-    Write-PipelineSummary -Root $root -AppName $AppName -HasFrontend $doFrontend -HasDocker $doDocker
+    Write-PipelineSummary -Root $root -AppName $AppName -HasCustomAdmin $doCustomAdmin -HasFrontend $doFrontend -HasDocker $doDocker
 }
 catch {
     Write-Failure -Message $_.Exception.Message
