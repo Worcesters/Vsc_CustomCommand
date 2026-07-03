@@ -249,6 +249,91 @@ function Test-PostgresHostTcpReady {
     }
 }
 
+function Test-PostgresHostSqlReady {
+    param([Parameter(Mandatory)][string]$Root)
+
+    Import-ProjectDotEnv -Root $Root
+    $pythonExe = Join-Path $Root ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $pythonExe)) {
+        return $false
+    }
+    $py = @'
+import os
+import sys
+try:
+    import psycopg
+except ImportError:
+    sys.exit(2)
+host = os.environ.get("DJANGO_DB_HOST", "localhost")
+port = int(os.environ.get("DJANGO_DB_PORT", "5432"))
+dbname = os.environ.get("DJANGO_DB_NAME", "app")
+user = os.environ.get("DJANGO_DB_USER", "app")
+password = os.environ.get("DJANGO_DB_PASSWORD", "dev")
+with psycopg.connect(
+    host=host,
+    port=port,
+    dbname=dbname,
+    user=user,
+    password=password,
+    connect_timeout=4,
+) as conn:
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1")
+        cur.fetchone()
+'@
+    $probePath = Join-Path $Root ".postgres_probe.py"
+    try {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($probePath, $py, $utf8NoBom)
+        & $pythonExe $probePath 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        if (Test-Path -LiteralPath $probePath) {
+            Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Wait-PostgresForMigrate {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [int]$TimeoutSeconds = 90
+    )
+
+    Import-ProjectDotEnv -Root $Root
+    $hostPort = Get-ProjectPostgresHostPort -Root $Root
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $attempt = 0
+
+    while ((Get-Date) -lt $deadline) {
+        $attempt++
+        if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+            if (Test-PostgresHostSqlReady -Root $Root) {
+                $script:ComposeDatabaseReady = $true
+                if ($attempt -gt 1) {
+                    Write-Host "     PostgreSQL pret pour migrate (localhost:$hostPort, tentative $attempt)" -ForegroundColor DarkGray
+                }
+                return
+            }
+        } else {
+            if ($attempt -eq 1) {
+                Write-Host "     PostgreSQL indisponible - redemarrage du service db..." -ForegroundColor DarkYellow
+            }
+            $script:ComposeDatabaseReady = $false
+            Start-ComposeDatabaseService -Root $Root -TimeoutSeconds 45
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    throw @"
+PostgreSQL non pret pour migrate apres ${TimeoutSeconds}s (localhost:$hostPort).
+Verifiez : docker compose ps
+Reinitialisez : docker compose down -v puis docker compose up -d db
+"@
+}
+
 function Test-ComposeDatabaseAcceptsConnections {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -311,15 +396,24 @@ function Invoke-DockerCompose {
 function Ensure-ComposeDatabaseForDjango {
     param(
         [Parameter(Mandatory)][string]$Root,
-        [int]$TimeoutSeconds = 60
+        [int]$TimeoutSeconds = 60,
+        [switch]$ForMigrate
     )
 
-    if ($script:ComposeDatabaseReady) {
-        $hostPort = Get-ProjectPostgresHostPort -Root $Root
-        Write-Host "     PostgreSQL deja verifie (etape 8, localhost:$hostPort)" -ForegroundColor DarkGray
+    if ($ForMigrate.IsPresent) {
+        Wait-PostgresForMigrate -Root $Root -TimeoutSeconds $TimeoutSeconds
         return
     }
-    if (Test-ComposeDatabaseAcceptsConnections -Root $Root -QuickTcpOnly) {
+
+    if ($script:ComposeDatabaseReady) {
+        if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+            $hostPort = Get-ProjectPostgresHostPort -Root $Root
+            Write-Host "     PostgreSQL deja verifie (localhost:$hostPort)" -ForegroundColor DarkGray
+            return
+        }
+        $script:ComposeDatabaseReady = $false
+    }
+    if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
         $hostPort = Get-ProjectPostgresHostPort -Root $Root
         Write-Host "     PostgreSQL deja operationnel (localhost:$hostPort)" -ForegroundColor DarkGray
         $script:ComposeDatabaseReady = $true
@@ -393,11 +487,13 @@ function Start-ComposeDatabaseService {
         throw "Docker introuvable - impossible de demarrer PostgreSQL (service db)."
     }
 
-    if (Test-ComposeDatabaseAcceptsConnections -Root $Root -QuickTcpOnly) {
-        $readyPort = Get-ProjectPostgresHostPort -Root $Root
-        $script:ComposeDatabaseReady = $true
-        Write-Host "     PostgreSQL deja pret (localhost:$readyPort)" -ForegroundColor DarkGray
-        return
+    if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+        if (Test-PostgresHostSqlReady -Root $Root) {
+            $readyPort = Get-ProjectPostgresHostPort -Root $Root
+            $script:ComposeDatabaseReady = $true
+            Write-Host "     PostgreSQL deja pret (localhost:$readyPort)" -ForegroundColor DarkGray
+            return
+        }
     }
 
     $hostPort = Get-ProjectPostgresHostPort -Root $Root
@@ -438,12 +534,16 @@ Arretez l'autre conteneur (docker ps) ou changez le mapping dans docker-compose.
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
         while ((Get-Date) -lt $deadline) {
             if (Test-PostgresHostTcpReady -Port $hostPort) {
-                break
+                if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
+                    if (Test-PostgresHostSqlReady -Root $Root) {
+                        break
+                    }
+                }
             }
             Start-Sleep -Seconds 1
         }
-        if (-not (Test-PostgresHostTcpReady -Port $hostPort)) {
-            throw "PostgreSQL (service db) non pret apres $($TimeoutSeconds)s"
+        if (-not (Test-PostgresHostSqlReady -Root $Root)) {
+            throw "PostgreSQL (service db) non pret apres $($TimeoutSeconds)s (pg_isready + connexion SQL)"
         }
         $script:ComposeDatabaseReady = $true
         Write-Host "     PostgreSQL pret (localhost:$hostPort, user app / password dev)" -ForegroundColor DarkGray
@@ -693,6 +793,13 @@ function Write-PipelineSummary {
     Write-Host "  Backend (dev) :" -ForegroundColor White
     Write-Host "    cd `"$Root`""
     Write-Host "    uv run python manage.py runserver"
+    if (-not $HasFrontend) {
+        Write-Host ""
+        Write-Host "  URLs (Django uniquement) :" -ForegroundColor White
+        Write-Host "    http://127.0.0.1:8000/              (accueil)"
+        Write-Host "    http://127.0.0.1:8000/django-admin/ (administration)"
+        Write-Host "    http://127.0.0.1:8000/api/health/   (sante API)"
+    }
     if ($HasFrontend) {
         Write-Host ""
         Write-Host "  IMPORTANT : le port 3000 ne repond que si Next.js est demarre." -ForegroundColor Yellow
@@ -745,6 +852,96 @@ function Test-PythonIdentifier {
         "None", "and", "or", "not", "in", "is", "lambda", "with", "async", "await"
     )
     return $reserved -notcontains $Name.ToLowerInvariant()
+}
+
+function ConvertFrom-YesNoAnswer {
+    # Accepte y/n, yes/no, oui/non (reponses francaises courantes).
+    param(
+        [string]$Answer,
+        [bool]$DefaultWhenEmpty = $true
+    )
+    $a = $Answer.Trim().ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($a)) {
+        return $DefaultWhenEmpty
+    }
+    if ($a -in @('y', 'yes', 'oui', 'o')) { return $true }
+    if ($a -in @('n', 'no', 'non')) { return $false }
+    return $null
+}
+
+function Read-YesNoPrompt {
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
+        [bool]$DefaultYes = $true
+    )
+    $hint = if ($DefaultYes) { 'Y/n' } else { 'y/N' }
+    do {
+        $raw = (Read-Host "$Prompt ($hint)").Trim()
+        $parsed = ConvertFrom-YesNoAnswer -Answer $raw -DefaultWhenEmpty:$DefaultYes
+        if ($null -ne $parsed) {
+            return $parsed
+        }
+        Write-Host "  Reponse invalide. Utilisez oui/non, y/n, ou Entree pour la valeur par defaut." -ForegroundColor DarkYellow
+    } while ($true)
+}
+
+function Test-ValidProjectFolderName {
+    param([Parameter(Mandatory)][string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    if ($Name -match '^https?://') { return $false }
+    if ($Name -match '[<>:"/\\|?*]') { return $false }
+    if ($Name -match '\.(com|fr|eu|net|org|io)(/|$)') { return $false }
+    return $true
+}
+
+function Write-MinimalMainCssFallback {
+    param([Parameter(Mandatory)][string]$Root)
+    $cssPath = Join-Path $Root "static\css\main.css"
+    $content = @"
+$(Get-BrandCharteTokensScss)
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+  margin: 0;
+}
+$(Get-BrandButtonsScss)
+"@
+    Write-TextFile -Path $cssPath -Content $content
+}
+
+function Invoke-ScssCompile {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $mainScss = Join-Path $Root "static\scss\main.scss"
+    $mainCss = Join-Path $Root "static\css\main.css"
+    if (-not (Test-Path -LiteralPath $mainScss)) {
+        return
+    }
+    $cssDir = Split-Path -Parent $mainCss
+    if (-not (Test-Path -LiteralPath $cssDir)) {
+        New-Item -ItemType Directory -Path $cssDir -Force | Out-Null
+    }
+
+    $npxPath = Resolve-NodeToolPath -Name "npx"
+    if (-not $npxPath) {
+        Write-Host "     Node/npx absent : CSS minimal genere (tokens + boutons)." -ForegroundColor DarkYellow
+        Write-MinimalMainCssFallback -Root $Root
+        return
+    }
+
+    try {
+        Invoke-NativeCli -Exe "npx" -Arguments @(
+            "--yes", "sass", "static/scss/main.scss", "static/css/main.css",
+            "--no-source-map", "--style=expanded"
+        ) -WorkingDirectory $Root -Quiet
+        if (-not (Test-Path -LiteralPath $mainCss)) {
+            throw "main.css non produit"
+        }
+    } catch {
+        Write-Host "     sass echoue : $($_.Exception.Message) - CSS minimal genere." -ForegroundColor DarkYellow
+        Write-MinimalMainCssFallback -Root $Root
+    }
 }
 
 function Get-BrandCharteTokensScss {
@@ -1807,8 +2004,8 @@ function Invoke-DjangoCreatesuperuser {
             Write-Host "  Base : SQLite (db.sqlite3). Activez .env + Docker pour PostgreSQL." -ForegroundColor DarkGray
         }
         Write-Host "  Laissez vide uniquement si vous le creerez plus tard." -ForegroundColor DarkGray
-        $skip = (Read-Host "Creer un superuser maintenant ? (Y/n)").Trim()
-        if ($skip -match '^[Nn]') {
+        $skip = -not (Read-YesNoPrompt -Prompt "Creer un superuser maintenant ?" -DefaultYes:$true)
+        if ($skip) {
             Write-Host "     createsuperuser ignore - plus tard : uv run python manage.py createsuperuser" -ForegroundColor DarkYellow
             return
         }
@@ -2223,17 +2420,30 @@ function New-DjangoNativeAdmin {
 
 from django.contrib import admin
 from django.contrib.auth import get_user_model
+from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 
 User = get_user_model()
 
 
-@admin.register(User)
-class ProjectUserAdmin(admin.ModelAdmin):
-    """Administration des utilisateurs Django."""
+class ProjectUserAdmin(DjangoUserAdmin):
+    """Administration des utilisateurs Django (remplace auth.UserAdmin par defaut)."""
 
-    list_display = ("username", "email", "is_staff", "is_active", "date_joined")
-    search_fields = ("username", "email")
-    list_filter = ("is_staff", "is_active")
+    list_display = (
+        "username",
+        "email",
+        "is_staff",
+        "is_superuser",
+        "is_active",
+        "date_joined",
+    )
+    list_filter = ("is_staff", "is_superuser", "is_active")
+    search_fields = ("username", "email", "first_name", "last_name")
+    ordering = ("username",)
+
+
+# auth enregistre deja User : desenregistrer avant de personnaliser.
+admin.site.unregister(User)
+admin.site.register(User, ProjectUserAdmin)
 '@
 }
 
@@ -3494,8 +3704,8 @@ body {
 
     New-Item -ItemType Directory -Path (Join-Path $Root "static\css") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $Root "static\js") -Force | Out-Null
-    Write-TextFile -Path (Join-Path $Root "static\css\.gitkeep") -Content "`n"
     Write-TextFile -Path (Join-Path $Root "static\js\.gitkeep") -Content "`n"
+    Invoke-ScssCompile -Root $Root
 }
 
 function Install-AdminDataStudioTemplates {
@@ -5099,10 +5309,14 @@ try {
     }
 
     if (-not $NoInteractive.IsPresent -and -not $useCurrent -and -not $wantsNewFolder) {
-        do {
-            $answer = (Read-Host "Nouveau dossier projet ? (Y/N)").Trim()
-        } while ($answer -notmatch '^[YyNn]$')
-        if ($answer -match '^[Yy]$') { $wantsNewFolder = $true } else { $useCurrent = $true }
+        $wantsNewFolder = Read-YesNoPrompt -Prompt "Nouveau dossier projet ?" -DefaultYes:$false
+        if ($wantsNewFolder) {
+            $wantsNewFolder = $true
+            $useCurrent = $false
+        } else {
+            $wantsNewFolder = $false
+            $useCurrent = $true
+        }
     }
 
     if ($NoInteractive.IsPresent -and -not $useCurrent -and -not $wantsNewFolder) {
@@ -5132,10 +5346,13 @@ try {
         if ([string]::IsNullOrWhiteSpace($projectFolder)) {
             do {
                 $projectFolder = (Read-Host "Nom du nouveau dossier").Trim()
+                if (-not (Test-ValidProjectFolderName -Name $projectFolder)) {
+                    Write-Host "  Nom invalide : utilisez un nom de dossier (pas une URL web)." -ForegroundColor DarkYellow
+                    $projectFolder = ""
+                }
             } while ([string]::IsNullOrWhiteSpace($projectFolder))
-        }
-        if ($projectFolder -match '[<>:"/\\|?*]') {
-            throw "Nom de dossier invalide pour Windows."
+        } elseif (-not (Test-ValidProjectFolderName -Name $projectFolder)) {
+            throw "Nom de dossier invalide : '$projectFolder' (pas une URL web, pas de \ / : * ? `" < > |)."
         }
         $parentPath = if ([string]::IsNullOrWhiteSpace($ParentPath)) {
             (Get-Location).Path
@@ -5175,15 +5392,11 @@ try {
     } elseif ($UseNextJs.IsPresent) {
         $wantsNextJs = $true
     } elseif (-not $NoInteractive.IsPresent) {
-        do {
-            $nextAnswer = (Read-Host "Utiliser Next.js pour l'UI DataStudio ? (Y/n)").Trim()
-        } while ($nextAnswer -ne '' -and $nextAnswer -notmatch '^[YyNn]$')
-        if ($nextAnswer -match '^[Nn]$') {
-            $wantsNextJs = $false
-            Write-Host "  Frontend retenu : pas de frontend/" -ForegroundColor Cyan
-        } else {
-            $wantsNextJs = $true
+        $wantsNextJs = Read-YesNoPrompt -Prompt "Utiliser Next.js pour l'UI DataStudio ?" -DefaultYes:$true
+        if ($wantsNextJs) {
             Write-Host "  Frontend retenu : Next.js DataStudio (/admin, /login)" -ForegroundColor Cyan
+        } else {
+            Write-Host "  Frontend retenu : pas de frontend/ (UI Django templates + SCSS)" -ForegroundColor Cyan
         }
     } else {
         $wantsNextJs = $true
@@ -5198,15 +5411,14 @@ try {
     } elseif ($UseCustomAdmin.IsPresent) {
         $wantsCustomAdmin = $true
     } elseif (-not $NoInteractive.IsPresent) {
-        do {
-            $adminAnswer = (Read-Host "Utiliser l'admin custom (admin_panel + API /api/admin/) ? (Y/n)").Trim()
-        } while ($adminAnswer -ne '' -and $adminAnswer -notmatch '^[YyNn]$')
-        if ($adminAnswer -match '^[Nn]$') {
-            $wantsCustomAdmin = $false
-            Write-Host "  Admin retenu : django.contrib.admin (/django-admin/)" -ForegroundColor Cyan
-        } else {
+        $wantsCustomAdmin = Read-YesNoPrompt -Prompt "Utiliser l'admin custom (admin_panel + API /api/admin/) ?" -DefaultYes:$true
+        if ($wantsCustomAdmin) {
             Write-Host "  Admin retenu : admin_panel + API /api/admin/" -ForegroundColor Cyan
+        } else {
+            Write-Host "  Admin retenu : django.contrib.admin (/django-admin/)" -ForegroundColor Cyan
         }
+    } else {
+        $wantsCustomAdmin = $true
     }
 
     if ($wantsNextJs -and -not $wantsCustomAdmin) {
@@ -5251,6 +5463,7 @@ try {
 
     Start-PipelineStep -Title "Application metier" -Detail "apps/$AppName + Service Layer"
     New-Item -ItemType Directory -Path (Join-Path $root "apps") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $root "apps\$AppName") -Force | Out-Null
     Write-TextFile -Path (Join-Path $root "apps\__init__.py") -Content @'
 """Applications metier du projet."""
 '@
@@ -5322,6 +5535,7 @@ try {
 
     if ($doCustomAdmin) {
         Start-PipelineStep -Title "Admin panel API" -Detail "apps/admin_panel + registry + schema DRF"
+        New-Item -ItemType Directory -Path (Join-Path $root "apps\admin_panel") -Force | Out-Null
         Invoke-UvCommand -Arguments @(
             "run", "django-admin", "startapp", "admin_panel", "apps\admin_panel"
         ) -WorkingDirectory $root -Quiet
@@ -5431,7 +5645,7 @@ $nextEnvBlock
                 throw "Docker requis pour PostgreSQL (.env) : installez Docker Desktop"
             }
             try {
-                Ensure-ComposeDatabaseForDjango -Root $root -TimeoutSeconds 30
+                Ensure-ComposeDatabaseForDjango -Root $root -TimeoutSeconds 90 -ForMigrate
             } catch {
                 throw @"
 PostgreSQL indisponible pour les migrations : $($_.Exception.Message)
