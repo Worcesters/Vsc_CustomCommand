@@ -347,130 +347,6 @@
   background: var(--ds-card);
 }
 
-.ds-er-capture {
-  width: 100%;
-  height: 100%;
-  background: var(--ds-bg);
-}
-
-.ds-er-capture__flow,
-.ds-er-preview__flow,
-.ds-er-modal__flow {
-  width: 100%;
-  height: 100%;
-}
-
-.ds-er-capture .react-flow {
-  width: 100%;
-  height: 100%;
-}
-
-/* Mini apercu (coin bas-droit) */
-.ds-er-preview {
-  position: absolute;
-  right: var(--space-3, 0.75rem);
-  bottom: var(--space-3, 0.75rem);
-  z-index: 12;
-  display: flex;
-  flex-direction: column;
-  width: 14rem;
-  height: 10rem;
-  border: 1px solid var(--ds-border);
-  border-radius: var(--ds-radius);
-  overflow: hidden;
-  background: var(--ds-card);
-  box-shadow: 0 6px 24px rgb(0 0 0 / 45%);
-  cursor: pointer;
-}
-
-.ds-er-preview__flow {
-  flex: 1;
-  min-height: 0;
-}
-
-.ds-er-preview__flow .react-flow__pane {
-  cursor: pointer;
-}
-
-.ds-er-preview__flow .react-flow__node {
-  cursor: pointer;
-}
-
-.ds-er-preview__label {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.35rem;
-  padding: 0.25rem 0.5rem;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  color: var(--ds-muted);
-  background: color-mix(in srgb, var(--ds-card) 90%, var(--ds-bg));
-  border-top: 1px solid var(--ds-border);
-  pointer-events: none;
-}
-
-/* Modal apercu plein ecran */
-.ds-er-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-4, 1rem);
-}
-
-.ds-er-modal__backdrop {
-  position: absolute;
-  inset: 0;
-  border: none;
-  padding: 0;
-  background: rgb(0 0 0 / 62%);
-  cursor: pointer;
-}
-
-.ds-er-modal__panel {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  width: min(94vw, 72rem);
-  height: min(88vh, 52rem);
-  border: 1px solid var(--ds-border);
-  border-radius: var(--ds-radius);
-  background: var(--ds-card);
-  box-shadow: 0 20px 56px rgb(0 0 0 / 50%);
-  overflow: hidden;
-}
-
-.ds-er-modal__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3, 0.75rem);
-  padding: var(--space-3, 0.75rem) var(--space-4, 1rem);
-  border-bottom: 1px solid var(--ds-border);
-}
-
-.ds-er-modal__header h3 {
-  margin: 0;
-  font-size: 1rem;
-}
-
-.ds-er-modal__hint {
-  margin: 0.25rem 0 0;
-  font-size: 0.75rem;
-}
-
-.ds-er-modal__canvas {
-  flex: 1;
-  min-height: 0;
-  background: var(--ds-bg);
-}
-
 .ds-er-capture .react-flow__node {
   cursor: grab;
 }
@@ -753,6 +629,17 @@
 
 .ds-grid-row--selected {
   background: color-mix(in srgb, var(--ds-primary) 12%, transparent);
+}
+
+.ds-er-capture {
+  width: 100%;
+  height: 100%;
+  background: var(--ds-bg);
+}
+
+.ds-er-capture .react-flow {
+  width: 100%;
+  height: 100%;
 }
 
 .ds-modal {

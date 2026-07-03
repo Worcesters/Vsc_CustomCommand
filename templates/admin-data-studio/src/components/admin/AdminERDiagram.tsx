@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import {
   Background,
   Controls,
   MarkerType,
+  MiniMap,
   ReactFlow,
   ReactFlowProvider,
   type Edge,
@@ -14,7 +15,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
 import { toSvg } from "html-to-image";
-import { Download, FileCode, Key, LinkIcon, Maximize2, X } from "lucide-react";
+import { Download, FileCode, Key, LinkIcon } from "lucide-react";
 import { downloadSchemaMermaid } from "@/lib/admin-api-client";
 import type { GlobalSchema } from "@/lib/schema-types";
 import type { StudioTable } from "@/lib/admin-studio-types";
@@ -77,83 +78,6 @@ function layoutElements(
   return { nodes: laid, edges };
 }
 
-type ErFlowSurfaceProps = Readonly<{
-  nodes: Node<ErNodeData>[];
-  edges: Edge[];
-  className?: string;
-  interactive?: boolean;
-  showControls?: boolean;
-  fitViewOnMount?: boolean;
-  onNodeClick?: (_: React.MouseEvent, node: Node<ErNodeData>) => void;
-  onOpenPreview?: () => void;
-}>;
-
-function ErFlowSurface({
-  nodes,
-  edges,
-  className,
-  interactive = true,
-  showControls = true,
-  fitViewOnMount = true,
-  onNodeClick,
-  onOpenPreview,
-}: ErFlowSurfaceProps) {
-  const preventContextMenu = useCallback((event: React.MouseEvent) => {
-    event.preventDefault();
-  }, []);
-
-  const handlePaneClick = useCallback(() => {
-    if (onOpenPreview) {
-      onOpenPreview();
-    }
-  }, [onOpenPreview]);
-
-  const handleNodeClick = useCallback(
-    (event: React.MouseEvent, node: Node<ErNodeData>) => {
-      if (onOpenPreview) {
-        onOpenPreview();
-        return;
-      }
-      onNodeClick?.(event, node);
-    },
-    [onNodeClick, onOpenPreview],
-  );
-
-  return (
-    <ReactFlowProvider>
-      <div
-        className={className}
-        onContextMenu={preventContextMenu}
-      >
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          onNodeClick={handleNodeClick}
-          onPaneClick={onOpenPreview ? handlePaneClick : undefined}
-          nodesDraggable={interactive}
-          nodesConnectable={false}
-          elementsSelectable={interactive}
-          selectNodesOnDrag={false}
-          panOnDrag={[2]}
-          panOnScroll={false}
-          zoomOnScroll
-          zoomOnPinch
-          zoomOnDoubleClick={false}
-          fitView={fitViewOnMount}
-          minZoom={0.08}
-          maxZoom={2.5}
-          defaultViewport={{ x: 0, y: 0, zoom: 0.85 }}
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background gap={20} color="var(--ds-border)" />
-          {showControls ? <Controls showInteractive={interactive} /> : null}
-        </ReactFlow>
-      </div>
-    </ReactFlowProvider>
-  );
-}
-
 type AdminERDiagramInnerProps = Readonly<{
   tables: StudioTable[];
   global: GlobalSchema;
@@ -168,7 +92,6 @@ function AdminERDiagramInner({
   onTableSelect,
 }: AdminERDiagramInnerProps) {
   const captureRef = useRef<HTMLDivElement>(null);
-  const [previewOpen, setPreviewOpen] = useState(false);
 
   const { nodes, edges } = useMemo(() => {
     const flowNodes: Node<ErNodeData>[] = tables.map((table, i) => ({
@@ -204,27 +127,6 @@ function AdminERDiagramInner({
     [onTableSelect],
   );
 
-  const openPreview = useCallback(() => {
-    setPreviewOpen(true);
-  }, []);
-
-  const closePreview = useCallback(() => {
-    setPreviewOpen(false);
-  }, []);
-
-  useEffect(() => {
-    if (!previewOpen) {
-      return undefined;
-    }
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setPreviewOpen(false);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [previewOpen]);
-
   const exportSvg = async () => {
     if (!captureRef.current) return;
     const dataUrl = await toSvg(captureRef.current, {
@@ -254,98 +156,45 @@ function AdminERDiagramInner({
   }
 
   return (
-    <>
-      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-        <div className="ds-grid-toolbar">
-          <span className="shell__muted">
-            Clic droit : deplacer · Molette : zoom · Apercu (bas droite) : clic gauche
-          </span>
-          <div style={{ marginLeft: "auto", display: "flex", gap: "0.5rem" }}>
-            <button
-              type="button"
-              className="ds-btn ds-btn--ghost"
-              onClick={openPreview}
-              title="Ouvrir l'apercu plein ecran"
-            >
-              <Maximize2 size={16} />
-              Apercu
-            </button>
-            <button type="button" className="ds-btn ds-btn--ghost" onClick={() => void exportMermaid()}>
-              <FileCode size={16} />
-              Mermaid (.mmd)
-            </button>
-            <button type="button" className="ds-btn ds-btn--primary" onClick={() => void exportSvg()}>
-              <Download size={16} />
-              SVG
-            </button>
-          </div>
-        </div>
-        <div ref={captureRef} className="ds-er-capture" style={{ flex: 1, minHeight: 0, position: "relative" }}>
-          <ErFlowSurface
-            className="ds-er-capture__flow"
-            nodes={nodes}
-            edges={edges}
-            onNodeClick={onNodeClick}
-            showControls
-            interactive
-          />
-          <div className="ds-er-preview" title="Clic gauche : ouvrir l'apercu · Clic droit : deplacer · Molette : zoom">
-            <ErFlowSurface
-              className="ds-er-preview__flow"
-              nodes={nodes}
-              edges={edges}
-              onOpenPreview={openPreview}
-              showControls={false}
-              interactive={false}
-              fitViewOnMount
-            />
-            <div className="ds-er-preview__label">
-              <Maximize2 size={12} />
-              Apercu
-            </div>
-          </div>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <div className="ds-grid-toolbar">
+        <span className="shell__muted">Cliquez sur une table pour naviguer</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: "0.5rem" }}>
+          <button type="button" className="ds-btn ds-btn--ghost" onClick={() => void exportMermaid()}>
+            <FileCode size={16} />
+            Mermaid (.mmd)
+          </button>
+          <button type="button" className="ds-btn ds-btn--primary" onClick={() => void exportSvg()}>
+            <Download size={16} />
+            SVG
+          </button>
         </div>
       </div>
-
-      {previewOpen ? (
-        <div className="ds-er-modal" role="dialog" aria-modal="true" aria-label="Apercu du schema ER">
-          <button
-            type="button"
-            className="ds-er-modal__backdrop"
-            aria-label="Fermer l'apercu"
-            onClick={closePreview}
-          />
-          <div className="ds-er-modal__panel">
-            <header className="ds-er-modal__header">
-              <div>
-                <h3>Schema ER — apercu</h3>
-                <p className="shell__muted ds-er-modal__hint">
-                  Clic droit : deplacer · Molette : zoom · Echap pour fermer
-                </p>
-              </div>
-              <button
-                type="button"
-                className="ds-btn ds-btn--ghost ds-btn--icon"
-                aria-label="Fermer"
-                onClick={closePreview}
-              >
-                <X size={18} />
-              </button>
-            </header>
-            <div className="ds-er-modal__canvas">
-              <ErFlowSurface
-                className="ds-er-modal__flow"
-                nodes={nodes}
-                edges={edges}
-                onNodeClick={onNodeClick}
-                showControls
-                interactive
-              />
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </>
+      <div ref={captureRef} className="ds-er-capture" style={{ flex: 1, minHeight: 0 }}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          onNodeClick={onNodeClick}
+          nodesDraggable
+          nodesConnectable={false}
+          elementsSelectable
+          selectNodesOnDrag={false}
+          panOnDrag
+          zoomOnScroll
+          zoomOnPinch
+          fitView
+          minZoom={0.2}
+          maxZoom={2}
+          defaultViewport={{ x: 0, y: 0, zoom: 0.85 }}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background gap={20} color="var(--ds-border)" />
+          <Controls />
+          <MiniMap pannable zoomable />
+        </ReactFlow>
+      </div>
+    </div>
   );
 }
 
@@ -357,5 +206,9 @@ type AdminERDiagramProps = Readonly<{
 }>;
 
 export function AdminERDiagram(props: AdminERDiagramProps) {
-  return <AdminERDiagramInner {...props} />;
+  return (
+    <ReactFlowProvider>
+      <AdminERDiagramInner {...props} />
+    </ReactFlowProvider>
+  );
 }
