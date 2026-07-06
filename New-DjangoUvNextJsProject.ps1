@@ -468,6 +468,8 @@ DJANGO_DB_PASSWORD=dev
 DJANGO_DB_HOST=localhost
 DJANGO_DB_PORT=$PostgresHostPort
 CORS_ALLOWED_ORIGINS=$corsOrigins
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
 
 # Superuser (optionnel, init ou docker-compose service web)
 # DJANGO_SUPERUSER_USERNAME=admin
@@ -2023,47 +2025,33 @@ function New-DjangoConfigPackage {
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppName,
         [bool]$HasCustomAdmin = $true,
-        [bool]$HasFrontend = $true
+        [bool]$HasFrontend = $true,
+        [bool]$HasDocker = $false
     )
 
     $adminPanelAppLine = if ($HasCustomAdmin) { '    "apps.admin_panel",' + "`n" } else { "" }
     $djangoAdminEnvDefault = if ($HasCustomAdmin) { '"false"' } else { '"true"' }
     $corsDefault = Get-CorsOrigins -HasFrontend $HasFrontend
-    # Avec Next.js, l'UI produit vit dans frontend/ : pas de templates/ ni static/scss Django.
-    # APP_DIRS=True suffit pour l'admin Django ; staticfiles sert l'admin automatiquement.
     $templatesDirs = if ($HasFrontend) { "[]" } else { '[BASE_DIR / "templates"]' }
     $staticfilesDirsBlock = if ($HasFrontend) {
         ""
     } else {
         "STATICFILES_DIRS = [BASE_DIR / `"static`"]`n"
     }
-    $restAuthClasses = if ($HasCustomAdmin) {
-        '        "rest_framework_simplejwt.authentication.JWTAuthentication",'
-    } else {
-        '        "rest_framework.authentication.SessionAuthentication",'
-    }
-    $simpleJwtBlock = if ($HasCustomAdmin) {
+    $celerySettingsBlock = if ($HasDocker) {
         @'
 
-from datetime import timedelta
-
-SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
-    "AUTH_HEADER_TYPES": ("Bearer",),
-}
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
 '@
     } else {
         ""
     }
-    $urlAdminApiBlock = if ($HasCustomAdmin) {
-        @'
-    path("api/auth/", include("apps.admin_panel.auth_urls")),
-    path("api/admin/", include("apps.admin_panel.urls")),
-'@
-    } else {
-        ""
-    }
+    $urlAdminApiBlock = ""
     $urlDjangoAdminBlock = if ($HasCustomAdmin) {
         @'
 if getattr(settings, "DJANGO_ADMIN_ENABLED", False):
@@ -2078,8 +2066,6 @@ urlpatterns.insert(0, path("django-admin/", admin.site.urls))
     $configDir = Join-Path $Root "config"
     $settingsDir = Join-Path $configDir "settings"
     New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
-
-    Write-TextFile -Path (Join-Path $configDir "__init__.py") -Content "# Package config.`n"
 
     $managePy = @'
 #!/usr/bin/env python
@@ -2164,7 +2150,6 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "rest_framework",
     "corsheaders",
     "apps.$AppName",
 $adminPanelAppLine]
@@ -2234,22 +2219,7 @@ STORAGES = {
         "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
     },
 }
-
-REST_FRAMEWORK = {
-    "DEFAULT_RENDERER_CLASSES": [
-        "rest_framework.renderers.JSONRenderer",
-    ],
-    "DEFAULT_PARSER_CLASSES": [
-        "rest_framework.parsers.JSONParser",
-    ],
-    "DEFAULT_AUTHENTICATION_CLASSES": [
-$restAuthClasses
-    ],
-    "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAuthenticated",
-    ],
-}
-$simpleJwtBlock
+$celerySettingsBlock
 
 _cors = os.environ.get("CORS_ALLOWED_ORIGINS", "$corsDefault")
 CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()]
@@ -2374,21 +2344,45 @@ DJANGO_ADMIN_ENABLED = False
 '@
     Write-TextFile -Path (Join-Path $settingsDir "prod.py") -Content $prodSettings
 
-    Write-TextFile -Path (Join-Path $configDir "health.py") -Content @'
-"""Sonde de disponibilite (Docker / load balancer)."""
+    Write-TextFile -Path (Join-Path $configDir "api.py") -Content @'
+"""API racine Django Ninja."""
 
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
-from rest_framework.views import APIView
+from __future__ import annotations
+
+from ninja import NinjaAPI
+
+api = NinjaAPI(
+    title="API",
+    version="1.0.0",
+    urls_namespace="api",
+)
 
 
-class HealthCheckView(APIView):
-    """GET /api/health/ - sans authentification."""
+@api.get("/health/", tags=["system"])
+def health_check(request) -> dict[str, str]:
+    """GET /api/health/ - sonde disponibilite."""
+    return {"status": "ok"}
 
-    permission_classes = [AllowAny]
 
-    def get(self, request) -> Response:
-        return Response({"status": "ok"})
+def register_api_routers() -> None:
+    """Enregistre les routers optionnels (admin, celery, apps metier)."""
+    try:
+        from apps.admin_panel.api import admin_router, auth_router
+
+        api.add_router("/auth/", auth_router)
+        api.add_router("/admin/", admin_router)
+    except ImportError:
+        pass
+
+    try:
+        from apps.core.api import core_router
+
+        api.add_router("/core/", core_router)
+    except ImportError:
+        pass
+
+
+register_api_routers()
 '@
 
     $configUrls = @"
@@ -2396,10 +2390,10 @@ from django.conf import settings
 from django.contrib import admin
 from django.urls import include, path
 
-from config.health import HealthCheckView
+from config.api import api
 
 urlpatterns = [
-    path("api/health/", HealthCheckView.as_view(), name="health"),
+    path("api/", api.urls),
 $urlAdminApiBlock
     path("", include("apps.$AppName.urls")),
 ]
@@ -2407,6 +2401,35 @@ $urlAdminApiBlock
 $urlDjangoAdminBlock
 "@
     Write-TextFile -Path (Join-Path $configDir "urls.py") -Content $configUrls
+
+    if ($HasDocker) {
+        Write-TextFile -Path (Join-Path $configDir "celery.py") -Content @'
+"""Application Celery (worker async)."""
+
+from __future__ import annotations
+
+import os
+
+from celery import Celery
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+
+celery_app = Celery("config")
+celery_app.config_from_object("django.conf:settings", namespace="CELERY")
+celery_app.autodiscover_tasks()
+
+app = celery_app
+'@
+        Write-TextFile -Path (Join-Path $configDir "__init__.py") -Content @'
+"""Package config."""
+
+from .celery import app as celery_app
+
+__all__ = ("celery_app",)
+'@
+    } else {
+        Write-TextFile -Path (Join-Path $configDir "__init__.py") -Content "# Package config.`n"
+    }
 }
 
 function New-DjangoNativeAdmin {
@@ -2457,11 +2480,11 @@ function New-AppServiceLayer {
 
     $homeEyebrow = if ($HasFrontend) { "Django + uv + Next.js" } else { "Django + uv" }
     $homeLead = if ($HasCustomAdmin -and $HasFrontend) {
-        "UI produit et administration DataStudio via Next.js. API metier exposee par Django/DRF."
+        "UI produit et administration DataStudio via Next.js. API metier exposee par Django Ninja."
     } elseif ($HasCustomAdmin) {
         "Administration via API /api/admin/ (admin_panel). Interface Next.js optionnelle."
     } else {
-        "Application Django avec admin natif. Service Layer et API DRF pour votre metier."
+        "Application Django avec admin natif. Service Layer et API Django Ninja pour votre metier."
     }
     $homeActions = if ($HasCustomAdmin -and $HasFrontend) {
         @'
@@ -2507,10 +2530,10 @@ def example_selector() -> str:
     return "selector"
 '@
 
-    Write-TextFile -Path (Join-Path $appDir "serializers.py") -Content @'
-"""Serializers DRF (validation API)."""
+    Write-TextFile -Path (Join-Path $appDir "schemas.py") -Content @'
+"""Schemas Django Ninja (validation entree/sortie API)."""
 
-from rest_framework import serializers
+from ninja import Schema
 '@
 
     Write-TextFile -Path (Join-Path $appDir "forms.py") -Content @'
@@ -2592,7 +2615,7 @@ $homeActions
     <section class="page-home__grid">
       <article class="page-home__card">
         <h2 class="page-home__card-title">API Django</h2>
-        <p class="page-home__card-text">Service Layer, DRF et migrations ORM.</p>
+        <p class="page-home__card-text">Service Layer, Django Ninja et migrations ORM.</p>
       </article>
       <article class="page-home__card">
         <h2 class="page-home__card-title">$card2Title</h2>
@@ -2629,6 +2652,52 @@ Ajoutez ici vos modeles metier supplementaires.
 "@
 }
 
+function New-CoreCeleryFiles {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$AppName
+    )
+
+    $appDir = Join-Path $Root "apps\$AppName"
+    Write-TextFile -Path (Join-Path $appDir "tasks.py") -Content @'
+"""Taches Celery (async) pour l''app metier."""
+
+from __future__ import annotations
+
+from celery import shared_task
+
+
+@shared_task(name="core.ping")
+def ping() -> str:
+    """Tache de test worker Celery."""
+    return "pong"
+'@
+
+    Write-TextFile -Path (Join-Path $appDir "api.py") -Content @'
+"""Routes API metier complementaires (Django Ninja)."""
+
+from __future__ import annotations
+
+from ninja import Router, Schema
+
+from .tasks import ping
+
+core_router = Router(tags=["core"])
+
+
+class AsyncPingOut(Schema):
+    task_id: str
+    status: str
+
+
+@core_router.post("/async-ping/", response=AsyncPingOut)
+def async_ping(request):
+    """POST /api/core/async-ping/ - declenche une tache Celery de test."""
+    async_result = ping.delay()
+    return AsyncPingOut(task_id=async_result.id, status="queued")
+'@
+}
+
 function New-AdminPanelBackend {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -2643,7 +2712,7 @@ from django.apps import AppConfig
 
 
 class AdminPanelConfig(AppConfig):
-    """Panneau admin custom (API DRF + registry whitelist)."""
+    """Panneau admin custom (API Django Ninja + registry whitelist)."""
 
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.admin_panel"
@@ -3237,327 +3306,262 @@ def delete_model_row(app_label: str, model_name: str, pk: str) -> None:
     model.objects.filter(pk=pk).delete()
 '@
 
-    Write-TextFile -Path (Join-Path $panelDir "serializers.py") -Content @'
-"""Serializers DRF pour l'admin panel."""
+    Write-TextFile -Path (Join-Path $panelDir "schemas.py") -Content @'
+"""Schemas Django Ninja (validation entree API)."""
 
-from rest_framework import serializers
+from ninja import Schema
 
 
-class QueryExecuteSerializer(serializers.Serializer):
+class QueryExecuteIn(Schema):
     """Payload execution requete SQL lecture seule."""
 
-    sql = serializers.CharField(max_length=10_000, trim_whitespace=True)
+    sql: str
 '@
 
-    Write-TextFile -Path (Join-Path $panelDir "permissions.py") -Content @'
-"""Permissions DRF pour l''admin panel."""
+    Write-TextFile -Path (Join-Path $panelDir "auth.py") -Content @'
+"""JWT utilitaires pour l''admin panel (superuser)."""
 
 from __future__ import annotations
 
-from rest_framework.permissions import BasePermission
-from rest_framework.request import Request
-from rest_framework.views import APIView
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import jwt
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from ninja.security import HttpBearer
+
+User = get_user_model()
+
+ACCESS_LIFETIME = timedelta(hours=8)
+REFRESH_LIFETIME = timedelta(days=1)
+ALGORITHM = "HS256"
 
 
-class IsSuperUser(BasePermission):
-    """Acces reserve aux superusers Django."""
+def _encode(payload: dict[str, Any], lifetime: timedelta) -> str:
+    now = datetime.now(tz=UTC)
+    body = {
+        **payload,
+        "exp": now + lifetime,
+        "iat": now,
+    }
+    return jwt.encode(body, settings.SECRET_KEY, algorithm=ALGORITHM)
 
-    message = "Superuser requis."
 
-    def has_permission(self, request: Request, view: APIView) -> bool:
-        user = request.user
-        return bool(
-            user and user.is_authenticated and getattr(user, "is_superuser", False)
-        )
+def create_token_pair(user: User) -> dict[str, str]:
+    """Genere une paire access/refresh JWT."""
+    base = {"user_id": user.pk, "username": user.username}
+    return {
+        "access": _encode({**base, "type": "access"}, ACCESS_LIFETIME),
+        "refresh": _encode({**base, "type": "refresh"}, REFRESH_LIFETIME),
+    }
+
+
+class AdminJWTAuth(HttpBearer):
+    """Authentification Bearer JWT — superuser requis."""
+
+    def authenticate(self, request, token: str) -> User | None:
+        try:
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+        except jwt.PyJWTError:
+            return None
+        if payload.get("type") != "access":
+            return None
+        user_id = payload.get("user_id")
+        if not user_id:
+            return None
+        try:
+            user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return None
+        if not user.is_active or not user.is_superuser:
+            return None
+        return user
 '@
 
-    Write-TextFile -Path (Join-Path $panelDir "auth_views.py") -Content @'
-"""Authentification admin (JWT, superuser uniquement)."""
+    Write-TextFile -Path (Join-Path $panelDir "api.py") -Content @'
+"""Routes API admin panel (Django Ninja)."""
 
 from __future__ import annotations
 
 from django.contrib.auth import authenticate
-from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.request import Request
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from rest_framework_simplejwt.tokens import RefreshToken
-
-from .permissions import IsSuperUser
-
-
-class AdminLoginView(APIView):
-    """POST /api/auth/login/ - JWT si superuser."""
-
-    permission_classes = [AllowAny]
-
-    def post(self, request: Request) -> Response:
-        username = str(request.data.get("username", "")).strip()
-        password = str(request.data.get("password", ""))
-        if not username or not password:
-            return Response(
-                {
-                    "detail": "Identifiant et mot de passe requis.",
-                    "code": "missing_credentials",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        user = authenticate(
-            request=request,
-            username=username,
-            password=password,
-        )
-        if user is None:
-            return Response(
-                {
-                    "detail": "Identifiants incorrects pour cette base de donnees.",
-                    "code": "invalid_credentials",
-                },
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-        if not user.is_superuser:
-            return Response(
-                {
-                    "detail": (
-                        "Compte reconnu mais acces refuse : superuser Django requis "
-                        "(docker compose exec web uv run python manage.py createsuperuser)."
-                    ),
-                    "code": "not_superuser",
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        refresh = RefreshToken.for_user(user)
-        return Response(
-            {
-                "access": str(refresh.access_token),
-                "refresh": str(refresh),
-                "user": {
-                    "username": user.username,
-                    "is_superuser": user.is_superuser,
-                },
-            }
-        )
-
-
-class AdminSessionView(APIView):
-    """GET /api/auth/session/ - profil superuser connecte."""
-
-    permission_classes = [IsAuthenticated, IsSuperUser]
-
-    def get(self, request: Request) -> Response:
-        user = request.user
-        return Response(
-            {
-                "username": user.username,
-                "is_superuser": user.is_superuser,
-            }
-        )
-'@
-
-    Write-TextFile -Path (Join-Path $panelDir "auth_urls.py") -Content @'
-"""Routes auth admin panel."""
-
-from django.urls import path
-
-from . import auth_views
-
-urlpatterns = [
-    path("login/", auth_views.AdminLoginView.as_view(), name="admin-login"),
-    path("session/", auth_views.AdminSessionView.as_view(), name="admin-session"),
-]
-'@
-
-    Write-TextFile -Path (Join-Path $panelDir "views.py") -Content @'
-from __future__ import annotations
-
 from django.core.exceptions import ObjectDoesNotExist
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.request import Request
-from rest_framework.response import Response
-from rest_framework.views import APIView
+from ninja import Router, Schema
 
 from . import selectors
-from .permissions import IsSuperUser
+from .auth import AdminJWTAuth, create_token_pair
+from .schemas import QueryExecuteIn
 
-_ADMIN_PERMS = [IsAuthenticated, IsSuperUser]
+auth_router = Router(tags=["auth"])
+admin_router = Router(tags=["admin"])
+_admin_auth = AdminJWTAuth()
 
 
-class RegistryListView(APIView):
+class LoginIn(Schema):
+    username: str
+    password: str
+
+
+class LoginUserOut(Schema):
+    username: str
+    is_superuser: bool
+
+
+class LoginOut(Schema):
+    access: str
+    refresh: str
+    user: LoginUserOut
+
+
+class SessionOut(Schema):
+    username: str
+    is_superuser: bool
+
+
+@auth_router.post("/login/", response={200: LoginOut, 400: dict, 401: dict, 403: dict})
+def admin_login(request, payload: LoginIn):
+    """POST /api/auth/login/ - JWT si superuser."""
+    username = payload.username.strip()
+    password = payload.password
+    if not username or not password:
+        return 400, {
+            "detail": "Identifiant et mot de passe requis.",
+            "code": "missing_credentials",
+        }
+    user = authenticate(request=request, username=username, password=password)
+    if user is None:
+        return 401, {
+            "detail": "Identifiants incorrects pour cette base de donnees.",
+            "code": "invalid_credentials",
+        }
+    if not user.is_superuser:
+        return 403, {
+            "detail": (
+                "Compte reconnu mais acces refuse : superuser Django requis "
+                "(docker compose exec web uv run python manage.py createsuperuser)."
+            ),
+            "code": "not_superuser",
+        }
+    tokens = create_token_pair(user)
+    return 200, LoginOut(
+        access=tokens["access"],
+        refresh=tokens["refresh"],
+        user=LoginUserOut(username=user.username, is_superuser=user.is_superuser),
+    )
+
+
+@auth_router.get("/session/", response={200: SessionOut, 401: dict, 403: dict}, auth=_admin_auth)
+def admin_session(request):
+    """GET /api/auth/session/ - profil superuser connecte."""
+    user = request.auth
+    return SessionOut(username=user.username, is_superuser=user.is_superuser)
+
+
+@admin_router.get("/registry/", auth=_admin_auth)
+def registry_list(request):
     """GET /api/admin/registry/ - liste whitelist models."""
-
-    permission_classes = _ADMIN_PERMS
-
-    def get(self, request: Request) -> Response:
-        return Response({"results": selectors.list_registry_entries()})
+    return {"results": selectors.list_registry_entries()}
 
 
-class SchemaGlobalView(APIView):
+@admin_router.get("/schema/", auth=_admin_auth)
+def schema_global(request):
     """GET /api/admin/schema/ - schema global + liaisons."""
-
-    permission_classes = _ADMIN_PERMS
-
-    def get(self, request: Request) -> Response:
-        return Response(selectors.get_global_schema())
+    return selectors.get_global_schema()
 
 
-class SchemaModelView(APIView):
-    """GET /api/admin/schema/<app>/<model>/ - schema d'une table."""
-
-    permission_classes = _ADMIN_PERMS
-
-    def get(self, request: Request, app_label: str, model_name: str) -> Response:
-        return Response(selectors.get_model_schema(app_label, model_name))
+@admin_router.get("/schema/{app_label}/{model_name}/", auth=_admin_auth)
+def schema_model(request, app_label: str, model_name: str):
+    """GET /api/admin/schema/<app>/<model>/ - schema d''une table."""
+    return selectors.get_model_schema(app_label, model_name)
 
 
-class SchemaExportView(APIView):
-    """GET /api/admin/schema/export/ - Mermaid markdown (+ SVG a generer cote front V2)."""
-
-    permission_classes = _ADMIN_PERMS
-
-    def get(self, request: Request) -> Response:
-        mermaid = selectors.export_schema_mermaid()
-        return Response(
-            {
-                "format": "mermaid",
-                "markdown": mermaid,
-                "svg_hint": "Telecharger via frontend/admin/schema (V2)",
-            }
-        )
+@admin_router.get("/schema/export/", auth=_admin_auth)
+def schema_export(request):
+    """GET /api/admin/schema/export/ - export Mermaid markdown."""
+    mermaid = selectors.export_schema_mermaid()
+    return {
+        "format": "mermaid",
+        "markdown": mermaid,
+        "svg_hint": "Telecharger via frontend/admin/schema (V2)",
+    }
 
 
-class ModelRowsListView(APIView):
-    """GET/POST /api/admin/models/<app>/<model>/ - grille admin CRUD."""
+@admin_router.get("/models/{app_label}/{model_name}/", auth=_admin_auth, response={200: dict, 404: dict})
+def model_rows_list(request, app_label: str, model_name: str):
+    """GET /api/admin/models/<app>/<model>/ - grille admin CRUD."""
+    from .services import AdminModelNotAllowedError, list_model_rows
 
-    permission_classes = _ADMIN_PERMS
-
-    def get(self, request: Request, app_label: str, model_name: str) -> Response:
-        from .services import AdminModelNotAllowedError, list_model_rows
-
-        try:
-            return Response(list_model_rows(app_label, model_name))
-        except AdminModelNotAllowedError:
-            return Response({"detail": "Model non autorise"}, status=status.HTTP_404_NOT_FOUND)
-
-    def post(self, request: Request, app_label: str, model_name: str) -> Response:
-        from .services import (
-            AdminModelNotAllowedError,
-            AdminModelValidationError,
-            create_model_row,
-        )
-
-        try:
-            row = create_model_row(app_label, model_name, request.data)
-            return Response(row, status=status.HTTP_201_CREATED)
-        except AdminModelNotAllowedError:
-            return Response({"detail": "Model non autorise"}, status=status.HTTP_404_NOT_FOUND)
-        except AdminModelValidationError as exc:
-            return Response(
-                {"detail": exc.detail, "fields": exc.fields},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        return list_model_rows(app_label, model_name)
+    except AdminModelNotAllowedError:
+        return 404, {"detail": "Model non autorise"}
 
 
-class ModelRowDetailView(APIView):
-    """PATCH/DELETE /api/admin/models/<app>/<model>/<pk>/."""
+@admin_router.post("/models/{app_label}/{model_name}/", auth=_admin_auth, response={201: dict, 400: dict, 404: dict})
+def model_rows_create(request, app_label: str, model_name: str, payload: dict):
+    """POST /api/admin/models/<app>/<model>/ - creation."""
+    from .services import (
+        AdminModelNotAllowedError,
+        AdminModelValidationError,
+        create_model_row,
+    )
 
-    permission_classes = _ADMIN_PERMS
-
-    def patch(
-        self,
-        request: Request,
-        app_label: str,
-        model_name: str,
-        pk: str,
-    ) -> Response:
-        from .services import (
-            AdminModelNotAllowedError,
-            AdminModelValidationError,
-            update_model_row,
-        )
-
-        try:
-            row = update_model_row(app_label, model_name, pk, request.data)
-            return Response(row)
-        except AdminModelNotAllowedError:
-            return Response({"detail": "Model non autorise"}, status=status.HTTP_404_NOT_FOUND)
-        except ObjectDoesNotExist:
-            return Response({"detail": "Ligne introuvable"}, status=status.HTTP_404_NOT_FOUND)
-        except AdminModelValidationError as exc:
-            return Response(
-                {"detail": exc.detail, "fields": exc.fields},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-    def delete(
-        self,
-        request: Request,
-        app_label: str,
-        model_name: str,
-        pk: str,
-    ) -> Response:
-        from .services import AdminModelNotAllowedError, delete_model_row
-
-        try:
-            delete_model_row(app_label, model_name, pk)
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        except AdminModelNotAllowedError:
-            return Response({"detail": "Model non autorise"}, status=status.HTTP_404_NOT_FOUND)
-        except ObjectDoesNotExist:
-            return Response({"detail": "Ligne introuvable"}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        row = create_model_row(app_label, model_name, payload)
+        return 201, row
+    except AdminModelNotAllowedError:
+        return 404, {"detail": "Model non autorise"}
+    except AdminModelValidationError as exc:
+        return 400, {"detail": exc.detail, "fields": exc.fields}
+    except ValueError as exc:
+        return 400, {"detail": str(exc)}
 
 
-class QueryExecuteView(APIView):
+@admin_router.patch("/models/{app_label}/{model_name}/{pk}/", auth=_admin_auth, response={200: dict, 400: dict, 404: dict})
+def model_row_update(request, app_label: str, model_name: str, pk: str, payload: dict):
+    """PATCH /api/admin/models/<app>/<model>/<pk>/."""
+    from .services import (
+        AdminModelNotAllowedError,
+        AdminModelValidationError,
+        update_model_row,
+    )
+
+    try:
+        return update_model_row(app_label, model_name, pk, payload)
+    except AdminModelNotAllowedError:
+        return 404, {"detail": "Model non autorise"}
+    except ObjectDoesNotExist:
+        return 404, {"detail": "Ligne introuvable"}
+    except AdminModelValidationError as exc:
+        return 400, {"detail": exc.detail, "fields": exc.fields}
+    except ValueError as exc:
+        return 400, {"detail": str(exc)}
+
+
+@admin_router.delete("/models/{app_label}/{model_name}/{pk}/", auth=_admin_auth, response={204: None, 404: dict})
+def model_row_delete(request, app_label: str, model_name: str, pk: str):
+    """DELETE /api/admin/models/<app>/<model>/<pk>/."""
+    from .services import AdminModelNotAllowedError, delete_model_row
+
+    try:
+        delete_model_row(app_label, model_name, pk)
+        return 204, None
+    except AdminModelNotAllowedError:
+        return 404, {"detail": "Model non autorise"}
+    except ObjectDoesNotExist:
+        return 404, {"detail": "Ligne introuvable"}
+
+
+@admin_router.post("/query/", auth=_admin_auth, response={200: dict, 400: dict})
+def query_execute(request, payload: QueryExecuteIn):
     """POST /api/admin/query/ - execute une requete SELECT lecture seule."""
+    from .selectors import AdminQueryError, execute_readonly_query
 
-    permission_classes = _ADMIN_PERMS
-
-    def post(self, request: Request) -> Response:
-        from .selectors import AdminQueryError, execute_readonly_query
-        from .serializers import QueryExecuteSerializer
-
-        serializer = QueryExecuteSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        sql = str(serializer.validated_data["sql"])
-        try:
-            return Response(execute_readonly_query(sql))
-        except AdminQueryError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-'@
-
-    Write-TextFile -Path (Join-Path $panelDir "urls.py") -Content @'
-from django.urls import path
-
-from . import views
-
-app_name = "admin_panel"
-
-urlpatterns = [
-    path("registry/", views.RegistryListView.as_view(), name="registry"),
-    path("query/", views.QueryExecuteView.as_view(), name="query-execute"),
-    path("schema/", views.SchemaGlobalView.as_view(), name="schema-global"),
-    path("schema/export/", views.SchemaExportView.as_view(), name="schema-export"),
-    path(
-        "schema/<str:app_label>/<str:model_name>/",
-        views.SchemaModelView.as_view(),
-        name="schema-model",
-    ),
-    path(
-        "models/<str:app_label>/<str:model_name>/",
-        views.ModelRowsListView.as_view(),
-        name="model-rows",
-    ),
-    path(
-        "models/<str:app_label>/<str:model_name>/<str:pk>/",
-        views.ModelRowDetailView.as_view(),
-        name="model-row-detail",
-    ),
-]
+    sql = payload.sql.strip()
+    try:
+        return execute_readonly_query(sql)
+    except AdminQueryError as exc:
+        return 400, {"detail": str(exc)}
 '@
 
     Write-TextFile -Path (Join-Path $panelDir "admin.py") -Content @'
@@ -3612,6 +3616,8 @@ def test_export_mermaid_contains_erdiagram() -> None:
     Write-TextFile -Path (Join-Path $panelDir "tests\test_query.py") -Content @'
 """Tests execution requetes SQL lecture seule."""
 
+import json
+
 import pytest
 
 from apps.admin_panel.selectors import AdminQueryError, validate_readonly_sql
@@ -3636,8 +3642,8 @@ def test_validate_rejects_multi_statement() -> None:
 def test_execute_select_returns_rows(api_client_superuser) -> None:
     response = api_client_superuser.post(
         "/api/admin/query/",
-        {"sql": "SELECT 1 AS num"},
-        format="json",
+        data=json.dumps({"sql": "SELECT 1 AS num"}),
+        content_type="application/json",
     )
     assert response.status_code == 200
     data = response.json()
@@ -3649,8 +3655,8 @@ def test_execute_select_returns_rows(api_client_superuser) -> None:
 def test_execute_rejects_insert(api_client_superuser) -> None:
     response = api_client_superuser.post(
         "/api/admin/query/",
-        {"sql": "INSERT INTO auth_user (username) VALUES ('x')"},
-        format="json",
+        data=json.dumps({"sql": "INSERT INTO auth_user (username) VALUES ('x')"}),
+        content_type="application/json",
     )
     assert response.status_code == 400
     assert "lecture seule" in response.json()["detail"]
@@ -3980,7 +3986,7 @@ import "@/styles/globals.scss";
 
 export const metadata: Metadata = {
   title: "App",
-  description: "Frontend Next.js - API Django/DRF",
+  description: "Frontend Next.js - API Django Ninja",
 };
 
 export default function RootLayout({
@@ -4029,7 +4035,7 @@ export default function HomePage() {
           <article className="page-home__card">
             <h2 className="page-home__card-title">API Django</h2>
             <p className="page-home__card-text">
-              Service Layer, DRF et persistance PostgreSQL.
+              Service Layer, Django Ninja et persistance PostgreSQL.
             </p>
           </article>
           <article className="page-home__card">
@@ -4254,6 +4260,10 @@ exec uv run gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS base
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+# Git requis : uv sync peut installer des deps depuis git+https://github.com/...
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 
 FROM base AS dev
 COPY pyproject.toml uv.lock ./
@@ -4302,6 +4312,16 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   web:
     build:
       context: .
@@ -4323,10 +4343,14 @@ services:
       DJANGO_DB_HOST: db
       DJANGO_DB_PORT: "5432"
       CORS_ALLOWED_ORIGINS: CORS_ORIGINS_PLACEHOLDER
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     ports:
       - "8000:8000"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test:
@@ -4338,6 +4362,35 @@ services:
       timeout: 5s
       retries: 6
       start_period: 120s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    command: ["uv", "run", "celery", "-A", "config", "worker", "-l", "info"]
+    volumes:
+      - .:/app
+      - backend_venv:/app/.venv
+    environment:
+      DJANGO_ENV: dev
+      DJANGO_SETTINGS_MODULE: config.settings
+      DJANGO_SECRET_KEY: dev-docker-only
+      DJANGO_USE_POSTGRES: "1"
+      DJANGO_DB_ENGINE: django.db.backends.postgresql
+      DJANGO_DB_NAME: app
+      DJANGO_DB_USER: app
+      DJANGO_DB_PASSWORD: dev
+      DJANGO_DB_HOST: db
+      DJANGO_DB_PORT: "5432"
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
 '@
@@ -4529,29 +4582,33 @@ import pytest
 
 @pytest.fixture
 def api_client():
-  """Client DRF pour tests API."""
-  from rest_framework.test import APIClient
-  return APIClient()
+    """Client Django pour tests API."""
+    from django.test import Client
+
+    return Client()
 
 
 @pytest.fixture
 def superuser(db):
-  """Superuser Django pour tests admin."""
-  from django.contrib.auth import get_user_model
+    """Superuser Django pour tests admin."""
+    from django.contrib.auth import get_user_model
 
-  User = get_user_model()
-  return User.objects.create_superuser(
-      username="admin",
-      email="admin@test.local",
-      password="admin-secret",
-  )
+    User = get_user_model()
+    return User.objects.create_superuser(
+        username="admin",
+        email="admin@test.local",
+        password="admin-secret",
+    )
 
 
 @pytest.fixture
 def api_client_superuser(api_client, superuser):
-  """Client DRF authentifie en superuser."""
-  api_client.force_authenticate(user=superuser)
-  return api_client
+    """Client authentifie JWT superuser."""
+    from apps.admin_panel.auth import create_token_pair
+
+    tokens = create_token_pair(superuser)
+    api_client.defaults["HTTP_AUTHORIZATION"] = f"Bearer {tokens['access']}"
+    return api_client
 '@
 
     Write-TextFile -Path (Join-Path $Root "pytest.ini") -Content @'
@@ -4564,6 +4621,8 @@ addopts = -ra
     if ($HasCustomAdmin) {
         Write-TextFile -Path (Join-Path $testsDir "test_admin_api.py") -Content @'
 """Tests API admin panel (auth superuser)."""
+
+import json
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -4579,9 +4638,14 @@ def test_registry_anonymous_forbidden(api_client) -> None:
 def test_registry_non_superuser_forbidden(api_client, db) -> None:
     User = get_user_model()
     user = User.objects.create_user(username="user", password="pass")
-    api_client.force_authenticate(user=user)
-    response = api_client.get("/api/admin/registry/")
-    assert response.status_code == 403
+    from apps.admin_panel.auth import create_token_pair
+
+    tokens = create_token_pair(user)
+    response = api_client.get(
+        "/api/admin/registry/",
+        HTTP_AUTHORIZATION=f"Bearer {tokens['access']}",
+    )
+    assert response.status_code == 401
 
 
 @pytest.mark.django_db
@@ -4604,8 +4668,8 @@ def test_login_rejects_non_superuser(api_client, db) -> None:
     User.objects.create_user(username="user", password="pass")
     response = api_client.post(
         "/api/auth/login/",
-        {"username": "user", "password": "pass"},
-        format="json",
+        data=json.dumps({"username": "user", "password": "pass"}),
+        content_type="application/json",
     )
     assert response.status_code == 403
     assert response.json()["code"] == "not_superuser"
@@ -4614,8 +4678,8 @@ def test_login_rejects_non_superuser(api_client, db) -> None:
 def test_login_rejects_wrong_password(api_client, superuser) -> None:
     response = api_client.post(
         "/api/auth/login/",
-        {"username": "admin", "password": "wrong-password"},
-        format="json",
+        data=json.dumps({"username": "admin", "password": "wrong-password"}),
+        content_type="application/json",
     )
     assert response.status_code == 401
     assert response.json()["code"] == "invalid_credentials"
@@ -4625,8 +4689,8 @@ def test_login_rejects_wrong_password(api_client, superuser) -> None:
 def test_login_accepts_superuser(api_client, superuser) -> None:
     response = api_client.post(
         "/api/auth/login/",
-        {"username": "admin", "password": "admin-secret"},
-        format="json",
+        data=json.dumps({"username": "admin", "password": "admin-secret"}),
+        content_type="application/json",
     )
     assert response.status_code == 200
     data = response.json()
@@ -4673,7 +4737,7 @@ function New-CursorProjectRules {
         ""
     }
     $adminPanelRow = if ($HasCustomAdmin) {
-        "| ``apps/admin_panel/`` | Registry whitelist + API DRF ``/api/admin/`` |`n"
+        "| ``apps/admin_panel/`` | Registry whitelist + API Django Ninja ``/api/admin/`` |`n"
     } else {
         ""
     }
@@ -4734,7 +4798,7 @@ package "frontend" {
   [App Router]
   [admin UI]
 }
-[frontend] --> [serializers] : HTTP JSON
+[frontend] --> [schemas] : HTTP JSON
 "@
     } else {
         ""
@@ -4791,7 +4855,7 @@ database "PostgreSQL" as db
 ## Matrice rapide
 | Sujet | Agent |
 |-------|--------|
-| Service Layer, CBV, DRF, MRO | @Architect (django-architect) |
+| Service Layer, CBV, Django Ninja, MRO | @Architect (django-architect) |
 | SCSS, tokens, BEM, admin Next | @UI-Engineer |
 | Next.js App Router, RSC | nextjs-specialist |
 | Docker, compose, CI | devops-engineer |
@@ -4811,7 +4875,7 @@ Skills globales : ``~/.cursor/skills/<nom>/SKILL.md``
 - ``uv`` exclusif (``uv add``, ``uv sync``, ``uv run``)
 - Service Layer : ``services.py`` (write), ``selectors.py`` (read), ``views.py`` = CBV uniquement
 - Pas de logique metier dans models, signals, templates, forms
-- DRF pour API consommee par Next.js
+- Django Ninja pour API consommee par Next.js
 
 ## UI Django (legacy templates)
 - Templates minimaux uniquement ; **pas de HTMX**
@@ -5053,18 +5117,19 @@ function Test-ProjectStructure {
         "config\settings\base.py",
         "config\settings\dev.py",
         "config\urls.py",
+        "config\api.py",
         "apps\$AppName\models.py",
         "apps\$AppName\services.py",
         "apps\$AppName\selectors.py",
-        "apps\$AppName\serializers.py",
+        "apps\$AppName\schemas.py",
         ".cursor\AGENTS.md",
         ".cursor\rules\00-project-stack.mdc"
     )
     if ($ExpectCustomAdmin) {
         $required += @(
             "apps\admin_panel\registry.py",
-            "apps\admin_panel\urls.py",
-            "apps\admin_panel\views.py"
+            "apps\admin_panel\api.py",
+            "apps\admin_panel\schemas.py"
         )
     } else {
         $required += "apps\$AppName\admin.py"
@@ -5104,7 +5169,10 @@ function Test-ProjectStructure {
             "docker-compose.yml",
             "docker-compose.prod.yml",
             "scripts\docker-web-dev.sh",
-            "scripts\docker-web-prod.sh"
+            "scripts\docker-web-prod.sh",
+            "config\celery.py",
+            "apps\$AppName\tasks.py",
+            "apps\$AppName\api.py"
         )
         if ($ExpectFrontend) {
             $required += "frontend\scripts\docker-entrypoint-dev.sh"
@@ -5443,11 +5511,14 @@ try {
         Invoke-UvCommand -Arguments @("init", "--name", $uvName) -WorkingDirectory $root -Quiet
     }
     $pyDeps = @(
-        "django", "djangorestframework",
+        "django", "django-ninja",
         "whitenoise", "django-cors-headers", "gunicorn", "psycopg[binary]"
     )
     if ($doCustomAdmin) {
-        $pyDeps += "djangorestframework-simplejwt"
+        $pyDeps += "pyjwt"
+    }
+    if ($doDocker) {
+        $pyDeps += "celery[redis]"
     }
     Invoke-UvCommand -Arguments (@("add") + $pyDeps) -WorkingDirectory $root -Quiet
     Invoke-UvCommand -Arguments @(
@@ -5458,7 +5529,7 @@ try {
     Complete-PipelineStep -Message "pyproject.toml + uv.lock"
 
     Start-PipelineStep -Title "Configuration Django" -Detail "config/ + settings dev|qua|prod"
-    New-DjangoConfigPackage -Root $root -AppName $AppName -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend
+    New-DjangoConfigPackage -Root $root -AppName $AppName -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend -HasDocker:$doDocker
     Complete-PipelineStep
 
     Start-PipelineStep -Title "Application metier" -Detail "apps/$AppName + Service Layer"
@@ -5478,6 +5549,9 @@ try {
         Write-TextFile -Path $appsPyPath -Content $appsPy
     }
     New-AppServiceLayer -Root $root -AppName $AppName -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend
+    if ($doDocker) {
+        New-CoreCeleryFiles -Root $root -AppName $AppName
+    }
     New-CoreModels -Root $root -AppName $AppName -HasCustomAdmin:$doCustomAdmin
     if (-not $doCustomAdmin) {
         New-DjangoNativeAdmin -Root $root -AppName $AppName
@@ -5534,7 +5608,7 @@ try {
     }
 
     if ($doCustomAdmin) {
-        Start-PipelineStep -Title "Admin panel API" -Detail "apps/admin_panel + registry + schema DRF"
+        Start-PipelineStep -Title "Admin panel API" -Detail "apps/admin_panel + registry + schema Django Ninja"
         New-Item -ItemType Directory -Path (Join-Path $root "apps\admin_panel") -Force | Out-Null
         Invoke-UvCommand -Arguments @(
             "run", "django-admin", "startapp", "admin_panel", "apps\admin_panel"

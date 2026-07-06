@@ -123,10 +123,15 @@ def example_selector() -> str:
     return "selector"
 '@
 
-    Write-TextFile -Path (Join-Path $AppDir "serializers.py") -Content @'
-"""Serializers DRF (validation API)."""
+    Write-TextFile -Path (Join-Path $AppDir "schemas.py") -Content @'
+"""Schemas Django Ninja (validation entree/sortie API)."""
 
-from rest_framework import serializers
+from ninja import Schema
+
+
+class HealthOut(Schema):
+    app: str
+    status: str
 '@
 
     Write-TextFile -Path (Join-Path $AppDir "forms.py") -Content @'
@@ -135,37 +140,20 @@ from rest_framework import serializers
 from django import forms
 '@
 
-    Write-TextFile -Path (Join-Path $AppDir "views.py") -Content @"
+    Write-TextFile -Path (Join-Path $AppDir "api.py") -Content @"
 from __future__ import annotations
 
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework.views import APIView
+from ninja import Router
+
+from .schemas import HealthOut
+
+router = Router(tags=["$PackageName"])
 
 
-class ${classPrefix}HealthView(APIView):
-    '''Endpoint sante minimal pour $PackageName.
-
-    MRO:
-    1. APIView.get -> reponse JSON
-    '''
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request) -> Response:
-        return Response({\"app\": \"$PackageName\", \"status\": \"ok\"})
-"@
-
-    Write-TextFile -Path (Join-Path $AppDir "urls.py") -Content @"
-from django.urls import path
-
-from . import views
-
-app_name = "$PackageName"
-
-urlpatterns = [
-    path("health/", views.${classPrefix}HealthView.as_view(), name="health"),
-]
+@router.get("/health/", response=HealthOut)
+def health(request) -> HealthOut:
+    '''GET /api/$PackageName/health/ - sante du package.'''
+    return HealthOut(app="$PackageName", status="ok")
 "@
 
     Write-TextFile -Path (Join-Path $AppDir "admin.py") -Content @'
@@ -186,15 +174,18 @@ from __future__ import annotations
     Write-TextFile -Path (Join-Path $AppDir "tests.py") -Content @"
 """Tests Pytest pour $PackageName."""
 
-import pytest
-from rest_framework.test import APIClient
+from ninja.testing import TestClient
+
+from $PackageName.api import router
 
 
-@pytest.mark.django_db
-def test_health_requires_auth() -> None:
-    client = APIClient()
-    response = client.get("/api/$PackageName/health/")
-    assert response.status_code in (401, 403)
+def test_health_ok() -> None:
+    client = TestClient(router)
+    response = client.get("/health/")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app"] == "$PackageName"
+    assert data["status"] == "ok"
 "@
 }
 
@@ -209,12 +200,12 @@ function New-GitPackagePyproject {
 [project]
 name = "$DistributionName"
 version = "0.1.0"
-description = "Application Django $PackageName (Service Layer, DRF)"
+description = "Application Django $PackageName (Service Layer, Django Ninja)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "django>=5.0",
-    "djangorestframework>=3.15",
+    "django-ninja>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -308,10 +299,12 @@ INSTALLED_APPS = [
 ]
 ``````
 
-Dans ``config/urls.py`` :
+Dans ``config/urls.py`` (via ``config/api.py`` du projet hote) :
 
 ``````python
-path("api/$PackageName/", include("$PackageName.urls")),
+from $PackageName.api import router as ${PackageName}_router
+
+api.add_router("/$PackageName/", ${PackageName}_router)
 ``````
 
 Puis :
@@ -331,7 +324,7 @@ uv add --editable ./chemin/vers/$DistributionName
 
 ## Structure
 
-- ``$PackageName/`` — app Django (models, services, selectors, serializers, views CBV)
+- ``$PackageName/`` — app Django (models, services, selectors, schemas, api Ninja)
 - ``pyproject.toml`` + ``uv.lock`` — metadata pip/uv (hatchling), deps verrouillees
 - ``.venv/`` — environnement local (gitignore, recree via ``uv sync``)
 "@
@@ -443,7 +436,7 @@ class ${pascal}Config(AppConfig):
     Write-Host "       uv add `"$distName @ git+https://github.com/VOTRE_ORG/$distName.git`""
     Write-Host "       uv add `"$distName @ git+https://github.com/VOTRE_ORG/VOTRE_MONOREPO.git#subdirectory=$distName`""
     Write-Host "    4. INSTALLED_APPS += `"$configClass`""
-    Write-Host "    5. path(`"api/$pkg/`", include(`"$pkg.urls`"))"
+    Write-Host "    5. api.add_router(`"/$pkg/`", ${pkg}_router) dans config/api.py"
     Write-Host ""
 }
 catch {
