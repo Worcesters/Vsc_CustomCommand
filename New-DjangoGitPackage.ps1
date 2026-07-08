@@ -126,7 +126,7 @@ def example_selector() -> str:
     Write-TextFile -Path (Join-Path $AppDir "schemas.py") -Content @'
 """Schemas Django Ninja (validation entree/sortie API)."""
 
-from ninja import Schema
+from ninja import ModelSchema
 
 
 class HealthOut(Schema):

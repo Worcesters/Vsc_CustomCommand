@@ -2533,7 +2533,7 @@ def example_selector() -> str:
     Write-TextFile -Path (Join-Path $appDir "schemas.py") -Content @'
 """Schemas Django Ninja (validation entree/sortie API)."""
 
-from ninja import Schema
+from ninja import ModelSchema
 '@
 
     Write-TextFile -Path (Join-Path $appDir "forms.py") -Content @'
@@ -3309,10 +3309,10 @@ def delete_model_row(app_label: str, model_name: str, pk: str) -> None:
     Write-TextFile -Path (Join-Path $panelDir "schemas.py") -Content @'
 """Schemas Django Ninja (validation entree API)."""
 
-from ninja import Schema
+from ninja import ModelSchema
 
 
-class QueryExecuteIn(Schema):
+class QueryExecuteIn(ModelSchema):
     """Payload execution requete SQL lecture seule."""
 
     sql: str
