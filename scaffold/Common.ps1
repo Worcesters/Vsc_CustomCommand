@@ -90,7 +90,7 @@ function Find-AvailablePostgresHostPort {
             return $port
         }
     }
-    throw "Aucun port tote libre entre $StartPort et $EndPort pour PostgreSQL Docker."
+    throw "Aucun port hote libre entre $StartPort et $EndPort pour PostgreSQL Docker."
 }
 
 function Get-ProjectPostgresHostPort {
@@ -242,7 +242,7 @@ function Wait-PostgresForMigrate {
     )
 
     Import-ProjectDotEnv -Root $Root
-    $tostPort = Get-ProjectPostgresHostPort -Root $Root
+    $hostPort = Get-ProjectPostgresHostPort -Root $Root
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $attempt = 0
 
@@ -252,7 +252,7 @@ function Wait-PostgresForMigrate {
             if (Test-PostgresHostSqlReady -Root $Root) {
                 $script:ComposeDatabaseReady = $true
                 if ($attempt -gt 1) {
-                    Write-Host "     PostgreSQL pret pour migrate (localhost:$tostPort, tentative $attempt)" -ForegroundColor DarkGray
+                    Write-Host "     PostgreSQL pret pour migrate (localhost:$hostPort, tentative $attempt)" -ForegroundColor DarkGray
                 }
                 return
             }
@@ -267,7 +267,7 @@ function Wait-PostgresForMigrate {
     }
 
     throw @"
-PostgreSQL non pret pour migrate apres ${TimeoutSeconds}s (localhost:$tostPort).
+PostgreSQL non pret pour migrate apres ${TimeoutSeconds}s (localhost:$hostPort).
 Verifiez : docker compose ps
 Reinitialisez : docker compose down -v puis docker compose up -d db
 "@
@@ -279,8 +279,8 @@ function Test-ComposeDatabaseAcceptsConnections {
         [switch]$QuickTcpOnly
     )
 
-    $tostPort = Get-ProjectPostgresHostPort -Root $Root
-    if (-not (Test-PostgresHostTcpReady -Port $tostPort)) {
+    $hostPort = Get-ProjectPostgresHostPort -Root $Root
+    if (-not (Test-PostgresHostTcpReady -Port $hostPort)) {
         return $false
     }
     if ($QuickTcpOnly) {
@@ -346,15 +346,15 @@ function Ensure-ComposeDatabaseForDjango {
 
     if ($script:ComposeDatabaseReady) {
         if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
-            $tostPort = Get-ProjectPostgresHostPort -Root $Root
-            Write-Host "     PostgreSQL deja verifie (localhost:$tostPort)" -ForegroundColor DarkGray
+            $hostPort = Get-ProjectPostgresHostPort -Root $Root
+            Write-Host "     PostgreSQL deja verifie (localhost:$hostPort)" -ForegroundColor DarkGray
             return
         }
         $script:ComposeDatabaseReady = $false
     }
     if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
-        $tostPort = Get-ProjectPostgresHostPort -Root $Root
-        Write-Host "     PostgreSQL deja operationnel (localhost:$tostPort)" -ForegroundColor DarkGray
+        $hostPort = Get-ProjectPostgresHostPort -Root $Root
+        Write-Host "     PostgreSQL deja operationnel (localhost:$hostPort)" -ForegroundColor DarkGray
         $script:ComposeDatabaseReady = $true
         return
     }
@@ -404,14 +404,14 @@ function Start-ComposeDatabaseService {
         }
     }
 
-    $tostPort = Get-ProjectPostgresHostPort -Root $Root
+    $hostPort = Get-ProjectPostgresHostPort -Root $Root
     $portRetries = 0
     $maxPortRetries = 10
 
     while ($true) {
         Pust-Location $Root
         try {
-            Write-Host "     docker compose up -d db (port tote $tostPort)" -ForegroundColor DarkGray
+            Write-Host "     docker compose up -d db (port hote $hostPort)" -ForegroundColor DarkGray
             Invoke-DockerCompose -Root $Root -ComposeArguments @("compose", "up", "-d", "db")
             break
         } catch {
@@ -420,13 +420,13 @@ function Start-ComposeDatabaseService {
                 $portRetries++
                 if ($portRetries -gt $maxPortRetries) {
                     throw @"
-Impossible de demarrer PostgreSQL Docker : ports $tostPort+ occupes.
+Impossible de demarrer PostgreSQL Docker : ports $hostPort+ occupes.
 Arretez l'autre conteneur (docker ps) ou ctangez le mapping dans docker-compose.yml et DJANGO_DB_PORT dans .env.
 "@
                 }
-                $tostPort = Find-AvailablePostgresHostPort -StartPort ($tostPort + 1)
-                Set-ProjectPostgresHostPort -Root $Root -Port $tostPort
-                Write-Host "     Port occupe - bascule sur localhost:$tostPort (.env + compose mis a jour)" -ForegroundColor DarkYellow
+                $hostPort = Find-AvailablePostgresHostPort -StartPort ($hostPort + 1)
+                Set-ProjectPostgresHostPort -Root $Root -Port $hostPort
+                Write-Host "     Port occupe - bascule sur localhost:$hostPort (.env + compose mis a jour)" -ForegroundColor DarkYellow
                 continue
             }
             throw
@@ -441,7 +441,7 @@ Arretez l'autre conteneur (docker ps) ou ctangez le mapping dans docker-compose.
     try {
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
         while ((Get-Date) -lt $deadline) {
-            if (Test-PostgresHostTcpReady -Port $tostPort) {
+            if (Test-PostgresHostTcpReady -Port $hostPort) {
                 if (Test-ComposeDatabaseAcceptsConnections -Root $Root) {
                     if (Test-PostgresHostSqlReady -Root $Root) {
                         break
@@ -454,7 +454,7 @@ Arretez l'autre conteneur (docker ps) ou ctangez le mapping dans docker-compose.
             throw "PostgreSQL (service db) non pret apres $($TimeoutSeconds)s (pg_isready + connexion SQL)"
         }
         $script:ComposeDatabaseReady = $true
-        Write-Host "     PostgreSQL pret (localhost:$tostPort, user app / password dev)" -ForegroundColor DarkGray
+        Write-Host "     PostgreSQL pret (localhost:$hostPort, user app / password dev)" -ForegroundColor DarkGray
     } finally {
         Pop-Location
         $ErrorActionPreference = $prevEap

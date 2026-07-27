@@ -180,51 +180,55 @@ Thumbs.db
 '@
 
     $consoleNote = if ($HasCustomAdmin) {
-        @"
+        @'
 ## Console DataStudio (HTMX Django)
 
-- Console : ``PUBLIC_DJANGO_URL`` + ``/admin/`` (ex. http://localhost:8000/admin/)
-- Connexion staff : ``/accounts/login/``
-- Pages Astro ``/admin`` et ``/login`` redirigent vers Django (compat legacy)
-- API admin : ``PUBLIC_API_URL`` + ``/api/admin/*`` (consommee par la Console HTMX)
-"@
+- Console : `PUBLIC_DJANGO_URL` + `/admin/` (ex. http://localhost:8000/admin/)
+- Connexion staff : `/accounts/login/`
+- Pages Astro `/admin` et `/login` redirigent vers Django (compat legacy)
+- API admin : `PUBLIC_API_URL` + `/api/admin/*` (consommee par la Console HTMX)
+'@
     } else {
         "Admin custom desactive : pas de Console DataStudio ni de redirects Astro."
     }
 
-    Write-TextFile -Path (Join-Path $fe "README.md") -Content @"
-# $ProjectSlug-frontend (Astro)
+    # PowerShell 5.1: backticks in expandable here-strings break parsing.
+    # Build README via literal template + replacements instead.
+    $feReadme = @'
+# __SLUG__-frontend (Astro)
 
-UI produit Astro 5 — port **4321**. App Django de reference : ``$AppName``.
+UI produit Astro 5 - port **4321**. App Django de reference : `__APP__`.
 
-**Zero React** — landing HTML + SCSS uniquement.
+**Zero React** - landing HTML + SCSS uniquement.
 
 ## Scripts
 
-``````bash
+```bash
 pnpm install
 pnpm dev    # http://0.0.0.0:4321
 pnpm build
-``````
+```
 
 ## Env
 
-- ``PUBLIC_API_URL`` (defaut ``http://localhost:8000``) — health API ``/api/health/``
-- ``PUBLIC_DJANGO_URL`` (defaut ``http://localhost:8000``) — liens HTML vers Django
-- Jamais de secrets dans ``PUBLIC_*``.
+- `PUBLIC_API_URL` (defaut `http://localhost:8000`) - health API `/api/health/`
+- `PUBLIC_DJANGO_URL` (defaut `http://localhost:8000`) - liens HTML vers Django
+- Jamais de secrets dans `PUBLIC_*`.
 
-$consoleNote
+__CONSOLE_NOTE__
 
 ## Styles
 
-SCSS 7-1 sous ``src/styles/`` — tokens Flat High-End, BEM. **Pas de Tailwind.**
-"@
+SCSS 7-1 sous `src/styles/` - tokens Flat High-End, BEM. **Pas de Tailwind.**
+'@
+    $feReadme = $feReadme.Replace('__SLUG__', $ProjectSlug).Replace('__APP__', $AppName).Replace('__CONSOLE_NOTE__', $consoleNote)
+    Write-TextFile -Path (Join-Path $fe "README.md") -Content $feReadme
 
     if (Get-Command New-DevLocalScript -ErrorAction SilentlyContinue) {
         New-DevLocalScript -Root $Root -HasDocker $true -HasCustomAdmin:$HasCustomAdmin
     } else {
-        Write-Host "     [warn] New-DevLocalScript absent — ajoutez Common.ps1 helpers" -ForegroundColor DarkYellow
+        Write-Host '     [warn] New-DevLocalScript absent - ajoutez Common.ps1 helpers' -ForegroundColor DarkYellow
     }
 
-    Write-Host "     Astro OK (slug=$ProjectSlug, admin=$HasCustomAdmin, app=$AppName)" -ForegroundColor DarkGray
+    Write-Host ('     Astro OK (slug={0}, admin={1}, app={2})' -f $ProjectSlug, $HasCustomAdmin, $AppName) -ForegroundColor DarkGray
 }
