@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# build
+dist/
+.astro/
+
+# env (garder .env.example)
+.env
+.env.local
+.env.*.local
+
+# logs / OS
+npm-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db

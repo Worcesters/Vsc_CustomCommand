@@ -1,0 +1,17 @@
+{% if error %}
+  <p class="console-flash console-flash--error">{{ error }}</p>
+{% else %}
+  <p class="console-editor__hint">{{ row_count }} ligne(s) Â· {{ elapsed_ms }} ms{% if truncated %} Â· tronque{% endif %}</p>
+  <div class="console-editor__scroll">
+    <table class="console-editor__table">
+      <thead>
+        <tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr>
+      </thead>
+      <tbody>
+        {% for row in display_rows %}
+          <tr>{% for cell in row %}<td>{% if cell.is_null %}<span class="console-editor__null">NULL</span>{% else %}{{ cell.display }}{% endif %}</td>{% endfor %}</tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}

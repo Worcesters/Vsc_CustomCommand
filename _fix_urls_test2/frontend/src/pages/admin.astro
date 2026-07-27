@@ -1,0 +1,25 @@
+---
+const djangoUrl = (import.meta.env.PUBLIC_DJANGO_URL ?? "http://localhost:8000").replace(
+  /\/$/,
+  "",
+);
+const target = `${djangoUrl}/console/`;
+---
+
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="refresh" content={`0;url=${target}`} />
+    <title>Redirection — Console</title>
+    <script define:vars={{ target }}>
+      window.location.replace(target);
+    </script>
+  </head>
+  <body>
+    <p>
+      Redirection vers la <a href={target}>Console Django</a>…
+    </p>
+  </body>
+</html>

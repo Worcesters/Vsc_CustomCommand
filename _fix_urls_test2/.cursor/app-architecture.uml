@@ -1,0 +1,37 @@
+@startuml
+package "config" {
+  [settings/base]
+  [settings/dev]
+  [settings/qua]
+  [settings/prod]
+  [urls]
+  [celery]
+}
+package "apps" {
+  package "core" {
+    [models]
+    [services]
+    [selectors]
+    [schemas]
+    [api]
+    [views HTMX]
+  }
+  package "auth" {
+    [User]
+  }
+  package "admin_panel" {
+    [registry]
+    [API /api/admin/]
+  }
+}
+package "templates" {
+  [HTMX partials]
+}
+package "frontend" {
+  [Astro pages]
+  [Astro landing]
+}
+[frontend] --> [schemas] : HTTP JSON
+database "PostgreSQL" as db
+[apps] --> db : ORM
+@enduml

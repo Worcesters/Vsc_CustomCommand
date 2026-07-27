@@ -1,0 +1,124 @@
+@use "../abstracts" as *;
+
+@keyframes home-rise {
+  from {
+    opacity: 0;
+    transform: translateY(0.75rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.page-home {
+  position: relative;
+  min-height: calc(100vh - 3.5rem);
+  overflow: hidden;
+  background: var(--color-bg);
+}
+
+.page-home__inner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-4);
+  max-width: 64rem;
+  margin: 0 auto;
+}
+
+.page-home__hero {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-8);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  animation: home-rise 0.55s ease-out both;
+}
+
+.page-home__eyebrow {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.page-home__title {
+  margin: 0;
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
+  line-height: 1.15;
+  color: var(--color-text);
+}
+
+.page-home__lead {
+  margin: 0;
+  max-width: 40rem;
+  color: var(--color-text-muted);
+  line-height: 1.55;
+}
+
+.page-home__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.page-home__grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+@include respond-to(md) {
+  .page-home__grid {
+    flex-direction: row;
+  }
+}
+
+.page-home__card {
+  flex: 1;
+  padding: var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  animation: home-rise 0.55s ease-out both;
+}
+
+.page-home__card:nth-child(1) {
+  animation-delay: 0.08s;
+}
+
+.page-home__card:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.page-home__card:nth-child(3) {
+  animation-delay: 0.24s;
+}
+
+.page-home__card-title {
+  margin: 0 0 var(--space-2);
+  font-size: 1rem;
+  color: var(--color-text);
+}
+
+.page-home__card-text {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-home__hero,
+  .page-home__card {
+    animation: none;
+  }
+}

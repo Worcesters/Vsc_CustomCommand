@@ -1,0 +1,45 @@
+<section class="console-admin" x-data="{ view: 'data' }">
+  {% if flash_error %}
+    <p class="console-flash console-flash--error" role="alert">{{ flash_error }}</p>
+  {% endif %}
+  <div class="console-admin__toolbar">
+    <div>
+      <h2 class="console-admin__title">Administration</h2>
+      <p class="console-admin__subtitle">Explorez le schema et modifiez vos donnees.</p>
+    </div>
+    <div class="console__pills" role="tablist">
+      <button type="button" class="console__pill" :class="view === 'data' && 'console__pill--active'" @click="view = 'data'">Donnees</button>
+      <button type="button" class="console__pill" :class="view === 'schema' && 'console__pill--active'" @click="view = 'schema'">Schema &amp; liens</button>
+      <button type="button" class="console__pill" :class="view === 'query' && 'console__pill--active'" @click="view = 'query'">Query SQL</button>
+      <button type="button" class="console__pill" :class="view === 'diagram' && 'console__pill--active'" @click="view = 'diagram'">Diagram</button>
+    </div>
+  </div>
+
+  <div x-show="view === 'data'" class="console-admin__body console-admin__body--data">
+    {% include "console/partials/_table_sidebar.html" %}
+    <div id="console-table-panel" class="console-admin__panel">
+      {% if selected_table %}
+        {% include "console/partials/_table_editor.html" %}
+      {% else %}
+        <p class="console-empty">Selectionnez une table dans la liste.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div x-show="view === 'schema'" x-cloak>
+    {% include "console/partials/_schema.html" %}
+  </div>
+
+  <div x-show="view === 'query'" x-cloak class="console-query">
+    {% include "console/partials/_query.html" %}
+  </div>
+
+  <div x-show="view === 'diagram'" x-cloak class="console-query">
+    {% include "console/partials/_diagram.html" %}
+  </div>
+
+  <div class="console-structure" x-show="view === 'data'">
+    <h3 class="console-structure__title">Creer / supprimer une table</h3>
+    {% include "console/partials/_ddl_tables.html" %}
+  </div>
+</section>

@@ -1,0 +1,18 @@
+@use "base/root";
+@use "base/reset";
+@use "components/buttons";
+@use "pages/home";
+@use "pages/backoffice";
+@use "components/console";
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+  margin: 0;
+  line-height: 1.5;
+}
+
+a {
+  color: inherit;
+}

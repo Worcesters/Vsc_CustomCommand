@@ -1,0 +1,332 @@
+<section class="console-diagram" id="console-diagram-root">
+  <div class="console-diagram__toolbar">
+    <div>
+      <h3 class="console-structure__title">Diagramme Mermaid (ER)</h3>
+      <p class="console-diagram__hint">
+        Cliquez une <strong>table</strong>, une <strong>colonne</strong> ou un <strong>lien</strong>
+        pour surligner le trait et les tables connectees.
+      </p>
+    </div>
+    <button type="button" class="console-btn console-btn--ghost console-btn--sm" id="console-diagram-clear" hidden>
+      Effacer la selection
+    </button>
+  </div>
+
+  {{ foreign_keys|json_script:"console-diagram-fks" }}
+  <div id="console-mermaid-host" class="console-diagram__canvas">
+    <pre class="console-query__pre console-diagram__source" id="console-mermaid">{{ mermaid }}</pre>
+  </div>
+</section>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+
+  const root = document.getElementById("console-diagram-root");
+  const host = document.getElementById("console-mermaid-host");
+  const source = document.getElementById("console-mermaid");
+  const clearBtn = document.getElementById("console-diagram-clear");
+  const fksEl = document.getElementById("console-diagram-fks");
+
+  if (!root || !host || !source || root.dataset.bound === "1") {
+    // no-op (HTMX re-swap / double init)
+  } else {
+    root.dataset.bound = "1";
+
+    const sanitize = (value) => {
+      let cleaned = String(value || "").trim().replace(/[^A-Za-z0-9_]/g, "_");
+      cleaned = cleaned.replace(/_+/g, "_").replace(/^_|_$/g, "");
+      if (!cleaned) cleaned = "x";
+      if (/^\d/.test(cleaned)) cleaned = `t_${cleaned}`;
+      return cleaned.toUpperCase().slice(0, 48);
+    };
+
+    const fksRaw = fksEl ? JSON.parse(fksEl.textContent || "[]") : [];
+    const edges = fksRaw.map((fk) => ({
+      from: sanitize(fk.from_table),
+      to: sanitize(fk.to_table),
+      fromCol: String(fk.from_column || "").toLowerCase(),
+      toCol: String(fk.to_column || "").toLowerCase(),
+      label: sanitize(fk.from_column),
+    }));
+
+    const neighborsOf = (entity) => {
+      const set = new Set([entity]);
+      edges.forEach((e) => {
+        if (e.from === entity) set.add(e.to);
+        if (e.to === entity) set.add(e.from);
+      });
+      return set;
+    };
+
+    const edgesForEntity = (entity) =>
+      edges.filter((e) => e.from === entity || e.to === entity);
+
+    const edgesForColumn = (colName) => {
+      const key = String(colName || "").toLowerCase();
+      return edges.filter((e) => e.fromCol === key || e.toCol === key);
+    };
+
+    const textOf = (node) => (node.textContent || "").replace(/\s+/g, " ").trim();
+
+    const findEntityGroups = (svg) => {
+      const candidates = [
+        ...svg.querySelectorAll("g.entityBox, g.er.entityBox, g[id*='entity'], g.node"),
+      ];
+      const groups = [];
+      const seen = new Set();
+      candidates.forEach((g) => {
+        if (seen.has(g)) return;
+        const texts = [...g.querySelectorAll("text")].map(textOf).filter(Boolean);
+        if (!texts.length) return;
+        // Premier texte = nom d'entite Mermaid (souvent UPPER)
+        const name = sanitize(texts[0]);
+        seen.add(g);
+        groups.push({ el: g, name, texts });
+      });
+      return groups;
+    };
+
+    const findEdgeGroups = (svg) => {
+      const paths = [
+        ...svg.querySelectorAll(
+          "path.relationshipLine, path.er.relationshipLine, g.edgePath path, path[class*='relation']",
+        ),
+      ];
+      return paths.map((path) => {
+        const group = path.closest("g") || path;
+        return { path, group };
+      });
+    };
+
+    const matchEdgeToFk = (edgeGroup, entityNames) => {
+      const labelText = textOf(edgeGroup.group).toLowerCase();
+      // Cherche un label de colonne dans le groupe
+      for (const e of edges) {
+        if (labelText.includes(e.fromCol) || labelText.includes(e.label.toLowerCase())) {
+          return e;
+        }
+      }
+      // Fallback: distance visuelle centre path <-> centres entities
+      try {
+        const pb = edgeGroup.path.getBBox();
+        const pcx = pb.x + pb.width / 2;
+        const pcy = pb.y + pb.height / 2;
+        let best = null;
+        let bestScore = Infinity;
+        for (const e of edges) {
+          const a = entityNames.get(e.from);
+          const b = entityNames.get(e.to);
+          if (!a || !b) continue;
+          const ab = a.getBBox();
+          const bb = b.getBBox();
+          const acx = ab.x + ab.width / 2;
+          const acy = ab.y + ab.height / 2;
+          const bcx = bb.x + bb.width / 2;
+          const bcy = bb.y + bb.height / 2;
+          // distance au segment
+          const dx = bcx - acx;
+          const dy = bcy - acy;
+          const len2 = dx * dx + dy * dy || 1;
+          let t = ((pcx - acx) * dx + (pcy - acy) * dy) / len2;
+          t = Math.max(0, Math.min(1, t));
+          const qx = acx + t * dx;
+          const qy = acy + t * dy;
+          const dist = (pcx - qx) ** 2 + (pcy - qy) ** 2;
+          if (dist < bestScore) {
+            bestScore = dist;
+            best = e;
+          }
+        }
+        return best;
+      } catch {
+        return null;
+      }
+    };
+
+    let activeKey = null;
+
+    const clearHighlight = (svg) => {
+      activeKey = null;
+      svg.classList.remove("console-diagram__svg--focus");
+      svg.querySelectorAll(".console-diagram__dim, .console-diagram__hot, .console-diagram__hot-edge, .console-diagram__hot-label")
+        .forEach((n) => {
+          n.classList.remove(
+            "console-diagram__dim",
+            "console-diagram__hot",
+            "console-diagram__hot-edge",
+            "console-diagram__hot-label",
+          );
+        });
+      if (clearBtn) clearBtn.hidden = true;
+    };
+
+    const applyHighlight = (svg, hotEntities, hotEdges) => {
+      svg.classList.add("console-diagram__svg--focus");
+      const entityMap = new Map(findEntityGroups(svg).map((g) => [g.name, g.el]));
+      const edgeGroups = findEdgeGroups(svg);
+
+      entityMap.forEach((el, name) => {
+        if (hotEntities.has(name)) el.classList.add("console-diagram__hot");
+        else el.classList.add("console-diagram__dim");
+      });
+
+      edgeGroups.forEach((eg) => {
+        const fk = matchEdgeToFk(eg, entityMap);
+        const isHot =
+          fk &&
+          hotEdges.some(
+            (h) => h.from === fk.from && h.to === fk.to && h.fromCol === fk.fromCol,
+          );
+        if (isHot) {
+          eg.path.classList.add("console-diagram__hot-edge");
+          eg.group.classList.add("console-diagram__hot-edge");
+        } else {
+          eg.path.classList.add("console-diagram__dim");
+          eg.group.classList.add("console-diagram__dim");
+        }
+      });
+
+      // Labels de relation (texte hors entity)
+      svg.querySelectorAll("text").forEach((t) => {
+        if (t.closest("g.entityBox, g.er.entityBox, g[id*='entity'], g.node")) return;
+        const raw = textOf(t).toLowerCase();
+        const hot = hotEdges.some(
+          (e) => raw.includes(e.fromCol) || raw.includes(e.label.toLowerCase()),
+        );
+        if (hot) t.classList.add("console-diagram__hot-label");
+        else t.classList.add("console-diagram__dim");
+      });
+
+      if (clearBtn) clearBtn.hidden = false;
+    };
+
+    const selectEntity = (svg, entity) => {
+      const key = `entity:${entity}`;
+      if (activeKey === key) {
+        clearHighlight(svg);
+        return;
+      }
+      activeKey = key;
+      const hotEntities = neighborsOf(entity);
+      const hotEdges = edgesForEntity(entity);
+      clearHighlight(svg);
+      activeKey = key;
+      applyHighlight(svg, hotEntities, hotEdges);
+    };
+
+    const selectEdge = (svg, fk) => {
+      if (!fk) return;
+      const key = `edge:${fk.from}:${fk.to}:${fk.fromCol}`;
+      if (activeKey === key) {
+        clearHighlight(svg);
+        return;
+      }
+      activeKey = key;
+      clearHighlight(svg);
+      activeKey = key;
+      applyHighlight(svg, new Set([fk.from, fk.to]), [fk]);
+    };
+
+    const selectColumn = (svg, colName, entityHint) => {
+      const related = edgesForColumn(colName);
+      if (!related.length) {
+        if (entityHint) selectEntity(svg, entityHint);
+        return;
+      }
+      const key = `col:${colName.toLowerCase()}`;
+      if (activeKey === key) {
+        clearHighlight(svg);
+        return;
+      }
+      const hotEntities = new Set();
+      related.forEach((e) => {
+        hotEntities.add(e.from);
+        hotEntities.add(e.to);
+      });
+      clearHighlight(svg);
+      activeKey = key;
+      applyHighlight(svg, hotEntities, related);
+    };
+
+    const wireSvg = (svg) => {
+      svg.classList.add("console-diagram__svg");
+      const groups = findEntityGroups(svg);
+      const entityMap = new Map(groups.map((g) => [g.name, g.el]));
+
+      groups.forEach(({ el, name }) => {
+        el.style.cursor = "pointer";
+        el.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          const target = ev.target;
+          // Clic sur un attribut / colonne
+          if (target && target.tagName && target.tagName.toLowerCase() === "text") {
+            const label = textOf(target);
+            // Ignore le titre d'entite
+            if (sanitize(label) !== name) {
+              const colGuess = label.split(/\s+/).pop() || label;
+              selectColumn(svg, colGuess, name);
+              return;
+            }
+          }
+          selectEntity(svg, name);
+        });
+      });
+
+      findEdgeGroups(svg).forEach((eg) => {
+        eg.path.style.cursor = "pointer";
+        eg.group.style.cursor = "pointer";
+        const handler = (ev) => {
+          ev.stopPropagation();
+          selectEdge(svg, matchEdgeToFk(eg, entityMap));
+        };
+        eg.path.addEventListener("click", handler);
+        eg.group.addEventListener("click", handler);
+      });
+
+      svg.addEventListener("click", () => clearHighlight(svg));
+      if (clearBtn) {
+        clearBtn.addEventListener("click", () => clearHighlight(svg));
+      }
+    };
+
+    const text = (source.textContent || "").trim();
+    if (!text) {
+      host.innerHTML = '<p class="console-flash console-flash--error">Diagramme vide.</p>';
+    } else {
+      try {
+        if (!window.__consoleMermaidReady) {
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: "dark",
+            securityLevel: "loose",
+            er: { useMaxWidth: true },
+          });
+          window.__consoleMermaidReady = true;
+        }
+        const id = "mmd-" + Date.now();
+        const { svg } = await mermaid.render(id, text);
+        const wrap = document.createElement("div");
+        wrap.className = "console-diagram__viewport";
+        const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
+        const svgNode = parsed.documentElement;
+        if (
+          svgNode &&
+          svgNode.nodeName.toLowerCase() === "svg" &&
+          !parsed.querySelector("parsererror")
+        ) {
+          const imported = document.importNode(svgNode, true);
+          wrap.appendChild(imported);
+          host.innerHTML = "";
+          host.appendChild(wrap);
+          wireSvg(imported);
+        } else {
+          throw new Error("SVG invalide");
+        }
+      } catch (err) {
+        host.innerHTML =
+          '<p class="console-flash console-flash--error" role="alert">' +
+          "Impossible de rendre le diagramme Mermaid (syntaxe invalide).</p>";
+      }
+    }
+  }
+</script>

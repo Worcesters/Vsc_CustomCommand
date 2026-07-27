@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Accueil{% endblock %}
+{% block content %}
+  <main class="page-home">
+    <div class="page-home__inner">
+      <header class="page-home__hero">
+        <p class="page-home__eyebrow">Django Ninja + Astro + HTMX</p>
+        <h1 class="page-home__title">Bienvenue sur core</h1>
+        <p class="page-home__lead">UI produit sur Astro (:4321). Cette surface Django sert l'API et le back-office staff HTMX.</p>
+        <div class="page-home__actions">
+        <a class="btn btn--primary" href="/console/">Ouvrir la Console</a>
+        <a class="btn btn--secondary" href="{% url 'core:backoffice_list' %}">Back-office</a>
+        <a class="btn btn--ghost" href="/api/health/">API Health</a>
+        <a class="btn btn--ghost" href="http://localhost:4321/">UI produit Astro</a>
+        </div>
+      </header>
+      <section class="page-home__grid" aria-label="Pilieres">
+        <article class="page-home__card">
+          <h2 class="page-home__card-title">API Django Ninja</h2>
+          <p class="page-home__card-text">Schemas Pydantic, orchestration vers services et selectors.</p>
+        </article>
+        <article class="page-home__card">
+          <h2 class="page-home__card-title">Back-office HTMX</h2>
+          <p class="page-home__card-text">Partials, CSRF, double rendu CBV pour le staff interne.</p>
+        </article>
+        <article class="page-home__card">
+          <h2 class="page-home__card-title">Flat High-End</h2>
+          <p class="page-home__card-text">SCSS 7-1, tokens :root zinc/slate, BEM, mobile-first.</p>
+        </article>
+      </section>
+    </div>
+  </main>
+{% endblock %}

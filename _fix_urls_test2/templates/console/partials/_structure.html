@@ -1,0 +1,84 @@
+<section class="console-structure" id="console-structure">
+  <h3 class="console-structure__title">Structure - {{ table_name }}</h3>
+  <ul class="console-structure__list">
+    {% for col in structure_columns %}
+      <li class="console-structure__row">
+        <span>
+          <span class="console-schema__mono">{{ col.name }}</span>
+          <span class="console-schema__muted"> {{ col.data_type }}</span>
+          {% if col.primary_key %}<span class="console-badge">PK</span>{% endif %}
+        </span>
+        <span class="console-form__row">
+          {% if not col.primary_key and can_ddl %}
+          <form
+            method="post"
+            hx-post="{% url 'admin_panel:console_column_rename' table_name %}"
+            hx-target="#console-table-panel"
+            hx-swap="innerHTML"
+            class="console-form__row"
+          >
+            {% csrf_token %}
+            <input type="hidden" name="old_name" value="{{ col.name }}">
+            <input class="console-form__input" type="text" name="new_name" placeholder="Nouveau nom" required>
+            <button type="submit" class="console-btn console-btn--ghost console-btn--sm">Renommer</button>
+          </form>
+          <form
+            method="post"
+            hx-post="{% url 'admin_panel:console_column_drop' table_name %}"
+            hx-target="#console-table-panel"
+            hx-swap="innerHTML"
+            hx-confirm="Supprimer la colonne {{ col.name }} ?"
+          >
+            {% csrf_token %}
+            <input type="hidden" name="column" value="{{ col.name }}">
+            <button type="submit" class="console-btn console-btn--danger console-btn--sm">Drop</button>
+          </form>
+          {% endif %}
+        </span>
+      </li>
+    {% empty %}
+      <li class="console-structure__row">Aucune colonne.</li>
+    {% endfor %}
+  </ul>
+  {% if can_ddl %}
+  <form
+    class="console-form"
+    method="post"
+    hx-post="{% url 'admin_panel:console_column_add' table_name %}"
+    hx-target="#console-table-panel"
+    hx-swap="innerHTML"
+  >
+    {% csrf_token %}
+    <div class="console-form__row">
+      <label class="console-form__field">
+        <span class="console-form__label">Nouvelle colonne</span>
+        <input class="console-form__input" type="text" name="name" required pattern="[A-Za-z_][A-Za-z0-9_]*">
+      </label>
+      <label class="console-form__field">
+        <span class="console-form__label">Type</span>
+        <select class="console-form__select" name="pg_type">
+          <option value="text">text</option>
+          <option value="varchar(255)">varchar(255)</option>
+          <option value="integer">integer</option>
+          <option value="bigint">bigint</option>
+          <option value="boolean">boolean</option>
+          <option value="timestamptz">timestamptz</option>
+          <option value="numeric">numeric</option>
+          <option value="uuid">uuid</option>
+          <option value="jsonb">jsonb</option>
+        </select>
+      </label>
+      <label class="console-form__field">
+        <span class="console-form__label">Nullable</span>
+        <select class="console-form__select" name="nullable">
+          <option value="1">Oui</option>
+          <option value="0">Non</option>
+        </select>
+      </label>
+      <button type="submit" class="console-btn console-btn--secondary console-btn--sm">Ajouter</button>
+    </div>
+  </form>
+  {% else %}
+  <p class="console-editor__hint">DDL desactive (table systeme protegee).</p>
+  {% endif %}
+</section>

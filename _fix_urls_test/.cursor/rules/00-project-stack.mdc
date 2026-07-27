@@ -1,0 +1,27 @@
+---
+description: Stack projet Django Ninja + Astro + HTMX + uv + Docker
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# Stack monorepo (genere)
+
+## Architecture
+- Django racine : `config/settings/` (base, dev, qua, prod)
+- `apps/` : Service Layer strict
+- `templates/` + HTMX : UI interne staff
+- `frontend/` : UI produit Astro (port 4321) si present
+- API admin : `/api/admin/` (`apps.admin_panel`) si present
+- `django-admin/` : fallback dev si `DJANGO_ADMIN_ENABLED=true`
+
+## Interdits
+- **Next.js** (Astro pour l'UI produit)
+- pip/poetry/pipenv (uv uniquement)
+- Fonctions dans `views.py` (CBV seulement)
+- Tailwind / utility-first CSS
+- Logique metier dans signals ou templates
+- Secrets dans `PUBLIC_*`
+- `DEBUG=True` en prod
+
+## Orchestration Cursor
+Lire `.cursor/AGENTS.md` et `.cursor/skills/STACK.md` en debut de tache.
