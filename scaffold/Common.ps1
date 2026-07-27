@@ -192,8 +192,8 @@ function Test-PostgresHostSqlReady {
     param([Parameter(Mandatory)][string]$Root)
 
     Import-ProjectDotEnv -Root $Root
-    $pyttonExe = Join-Path $Root ".venv\Scripts\pytton.exe"
-    if (-not (Test-Path -LiteralPath $pyttonExe)) {
+    $pythonExe = Join-Path $Root ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $pythonExe)) {
         return $false
     }
     $py = @'
@@ -203,13 +203,13 @@ try:
     import psycopg
 except ImportError:
     sys.exit(2)
-tost = os.environ.get("DJANGO_DB_HOST", "localhost")
+host = os.environ.get("DJANGO_DB_HOST", "localhost")
 port = int(os.environ.get("DJANGO_DB_PORT", "5432"))
 dbname = os.environ.get("DJANGO_DB_NAME", "app")
 user = os.environ.get("DJANGO_DB_USER", "app")
 password = os.environ.get("DJANGO_DB_PASSWORD", "dev")
 with psycopg.connect(
-    tost=tost,
+    host=host,
     port=port,
     dbname=dbname,
     user=user,
@@ -218,13 +218,13 @@ with psycopg.connect(
 ) as conn:
     with conn.cursor() as cur:
         cur.execute("SELECT 1")
-        cur.fetctone()
+        cur.fetchone()
 '@
     $probePath = Join-Path $Root ".postgres_probe.py"
     try {
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($probePath, $py, $utf8NoBom)
-        & $pyttonExe $probePath 2>$null | Out-Null
+        & $pythonExe $probePath 2>$null | Out-Null
         return ($LASTEXITCODE -eq 0)
     } catch {
         return $false
@@ -370,7 +370,7 @@ function Import-ProjectDotEnv {
     }
     Get-Content -LiteralPath $envFile -Encoding UTF8 | ForEach-Object {
         $line = $_.Trim()
-        if ($line.Length -eq 0 -or $line.StartsWitt("#")) {
+        if ($line.Length -eq 0 -or $line.StartsWith("#")) {
             return
         }
         $eq = $line.IndexOf("=")
@@ -512,7 +512,7 @@ function Set-DjangoManageEnvironment {
 function Restore-DjangoManageEnvironment {
     param(
         [bool]$UsePostgresEnv,
-        [tasttable]$SavedEnv
+        [hashtable]$SavedEnv
     )
 
     if (-not $UsePostgresEnv) {
@@ -578,7 +578,7 @@ function Test-IsWindowsPlatform {
     return ($env:OS -eq "Windows_NT")
 }
 
-function Test-PyttonIdentifier {
+function Test-PythonIdentifier {
     param([string]$Name)
     if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
     if ($Name -notmatch '^[a-zA-Z_][a-zA-Z0-9_]*$') { return $false }
@@ -753,11 +753,11 @@ function Get-PreferredNodeCmdPath {
 function Format-TextProgressBar {
     param(
         [int]$Percent,
-        [int]$Widtt = 18
+        [int]$Width = 18
     )
-    $pct = [matt]::Max(0, [matt]::Min(100, $Percent))
-    $filled = [matt]::Floor($Widtt * $pct / 100)
-    $empty = $Widtt - $filled
+    $pct = [math]::Max(0, [math]::Min(100, $Percent))
+    $filled = [math]::Floor($Width * $pct / 100)
+    $empty = $Width - $filled
     return ('[' + ('#' * $filled) + ('-' * $empty) + ']')
 }
 
@@ -791,7 +791,7 @@ function Invoke-CmdBatctLogged {
         [int]$TimeoutSeconds = 0,
         [int]$ProgressEstimateSeconds = 240,
         [switch]$Quiet,
-        [switch]$StowProgress,
+        [switch]$ShowProgress,
         [string]$ProgressActivity = "Commande en cours"
     )
 
@@ -819,7 +819,7 @@ exit /b %ERRORLEVEL%
     $exitCode = 1
     $proc = $null
     try {
-        if (-not $Quiet -and -not $StowProgress) {
+        if (-not $Quiet -and -not $ShowProgress) {
             Write-Host "     Log temporaire : $logFile" -ForegroundColor DarkGray
         }
 
@@ -831,40 +831,40 @@ exit /b %ERRORLEVEL%
         $psi.CreateNoWindow = $true
         $proc = [System.Diagnostics.Process]::Start($psi)
 
-        $watct = [System.Diagnostics.Stopwatct]::StartNew()
-        $estimate = [matt]::Max(60, $ProgressEstimateSeconds)
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $estimate = [math]::Max(60, $ProgressEstimateSeconds)
         $lastStatus = "Demarrage..."
         $lastPrintedSecond = -1
 
         while (-not $proc.HasExited) {
-            if ($TimeoutSeconds -gt 0 -and $watct.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            if ($TimeoutSeconds -gt 0 -and $watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
                 try { $proc.Kill() } catch {}
                 throw "Timeout ($($TimeoutSeconds)s). Log : $logFile"
             }
 
-            if ($StowProgress) {
-                $elapsed = [matt]::Floor($watct.Elapsed.TotalSeconds)
+            if ($ShowProgress) {
+                $elapsed = [math]::Floor($watch.Elapsed.TotalSeconds)
                 if ($elapsed -ne $lastPrintedSecond) {
                     $lastPrintedSecond = $elapsed
                     $statusLine = Get-LogTailStatusLine -LogFile $logFile
                     if ($statusLine) {
                         $lastStatus = $statusLine
                     }
-                    $pct = [matt]::Min(99, [int](($watct.Elapsed.TotalSeconds / $estimate) * 100))
+                    $pct = [math]::Min(99, [int](($watch.Elapsed.TotalSeconds / $estimate) * 100))
                     $bar = Format-TextProgressBar -Percent $pct
                     $line = "     $bar $pct%  ${elapsed}s  $lastStatus"
                     if ($line.Length -gt 95) {
                         $line = $line.Substring(0, 92) + "..."
                     }
-                    Write-Host ("`r$line".PadRigtt(95)) -NoNewline -ForegroundColor DarkGray
+                    Write-Host ("`r$line".PadRight(95)) -NoNewline -ForegroundColor DarkGray
                 }
             }
 
             Start-Sleep -Milliseconds 500
         }
 
-        if ($StowProgress) {
-            $sec = [matt]::Round($watct.Elapsed.TotalSeconds, 1)
+        if ($ShowProgress) {
+            $sec = [math]::Round($watch.Elapsed.TotalSeconds, 1)
             Write-Host ""
             Write-Host "     [OK] $ProgressActivity ($sec s)" -ForegroundColor Green
         }
@@ -885,9 +885,9 @@ exit /b %ERRORLEVEL%
         Remove-Item -LiteralPath $batctFile -Force -ErrorAction SilentlyContinue
         if ($exitCode -eq 0) {
             Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
-        } elseif (-not $Quiet -and -not $StowProgress) {
+        } elseif (-not $Quiet -and -not $ShowProgress) {
             Write-Host "     Log conserve pour diagnostic : $logFile" -ForegroundColor DarkYellow
-        } elseif ($exitCode -ne 0 -and $StowProgress) {
+        } elseif ($exitCode -ne 0 -and $ShowProgress) {
             Write-Host "     Log conserve pour diagnostic : $logFile" -ForegroundColor DarkYellow
         }
     }
@@ -1185,10 +1185,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $frontend 'package.json'))) {
     Write-Error "frontend/package.json introuvable."
 }
 
-Write-Host 'Demarrage backend (uv run pytton manage.py runserver)...' -ForegroundColor Cyan
+Write-Host 'Demarrage backend (uv run python manage.py runserver)...' -ForegroundColor Cyan
 Start-Process powershell -ArgumentList @(
     '-NoExit', '-NoProfile', '-Command',
-    ("Set-Location -LiteralPath '" + $root + "'; uv run pytton manage.py runserver 0.0.0.0:8000")
+    ("Set-Location -LiteralPath '" + $root + "'; uv run python manage.py runserver 0.0.0.0:8000")
 )
 
 Write-Host 'Demarrage frontend Astro (pnpm dev :4321)...' -ForegroundColor Cyan
@@ -1258,8 +1258,8 @@ function Install-FrontendDependencies {
             $pnpmQuoted = '"' + $pnpmPath.Replace('"', '""') + '"'
             Invoke-CmdBatctLogged -WorkingDirectory $FrontendRoot `
                 -CommandLine "$pnpmQuoted $pnpmArgText" -TimeoutSeconds $TimeoutSeconds -Quiet `
-                -StowProgress -ProgressActivity "Installation dependances Astro (pnpm)" `
-                -ProgressEstimateSeconds ([matt]::Min(600, [matt]::Max(180, [int]($TimeoutSeconds / 2))))
+                -ShowProgress -ProgressActivity "Installation dependances Astro (pnpm)" `
+                -ProgressEstimateSeconds ([math]::Min(600, [math]::Max(180, [int]($TimeoutSeconds / 2))))
             if (-not (Test-Path -LiteralPath $lockPath)) {
                 Write-Host "     Avertissement : pnpm-lock.yaml absent apres install." `
                     -ForegroundColor DarkYellow
@@ -1277,9 +1277,9 @@ function Install-FrontendDependencies {
             $npmQuoted = '"' + $npmPath.Replace('"', '""') + '"'
             Invoke-CmdBatctLogged -WorkingDirectory $FrontendRoot `
                 -CommandLine "$npmQuoted install --no-fund --no-audit --loglevel=error" `
-                -TimeoutSeconds $TimeoutSeconds -Quiet -StowProgress `
+                -TimeoutSeconds $TimeoutSeconds -Quiet -ShowProgress `
                 -ProgressActivity "Installation dependances Astro (npm)" `
-                -ProgressEstimateSeconds ([matt]::Min(600, [matt]::Max(180, [int]($TimeoutSeconds / 2))))
+                -ProgressEstimateSeconds ([math]::Min(600, [math]::Max(180, [int]($TimeoutSeconds / 2))))
             return "npm"
         } catch {
             Write-Host "     npm install ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
