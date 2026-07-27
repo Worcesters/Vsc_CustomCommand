@@ -1,30 +1,56 @@
 # fix_urls_test-frontend (Astro)
 
-UI produit Astro 5 — port **4321**. App Django de reference : `core`.
+UI produit **Astro 5** — port **4321**. Backend Django de reference : `apps.core`.
 
-**Zero React** — landing HTML + SCSS uniquement.
+Le guide complet (lancement monorepo, architecture, ajouter pages/composants) est dans le **[README racine](../README.md#frontend-astro-guide)**.
+
+## Demarrage
+
+```bash
+# Depuis frontend/
+cp .env.example .env   # ou copy sous Windows
+pnpm install
+pnpm dev               # http://127.0.0.1:4321
+```
+
+Depuis la racine du monorepo (Django + Astro) :
+
+```powershell
+.\scripts\dev-local.ps1
+```
 
 ## Scripts
 
-```bash
-pnpm install
-pnpm dev    # http://0.0.0.0:4321
-pnpm build
-```
+| Commande | Role |
+|----------|------|
+| `pnpm dev` | Serveur de dev (hot reload) |
+| `pnpm build` | Build static → `dist/` |
+| `pnpm preview` | Previsualiser le build |
+| `pnpm check` | Verif Astro + TypeScript |
 
-## Env
+## Variables `PUBLIC_*`
 
-- `PUBLIC_API_URL` (defaut `http://localhost:8000`) — health API `/api/health/`
-- `PUBLIC_DJANGO_URL` (defaut `http://localhost:8000`) — liens HTML vers Django
-- Jamais de secrets dans `PUBLIC_*`.
+| Variable | Role |
+|----------|------|
+| `PUBLIC_API_URL` | Base API Ninja (ex. health `/api/health/`) |
+| `PUBLIC_DJANGO_URL` | Liens HTML vers Django (`/admin/`, login, back-office) |
 
-## Console DataStudio (HTMX Django)
+**Jamais de secrets** dans `PUBLIC_*`.
 
-- Console : `PUBLIC_DJANGO_URL` + `/admin/` (ex. http://localhost:8000/admin/)
-- Connexion staff : `/accounts/login/`
-- Pages Astro `/admin` et `/login` redirigent vers Django (compat legacy)
-- API admin : `PUBLIC_API_URL` + `/api/admin/*` (consommee par la Console HTMX)
+## Routing (rappel)
 
-## Styles
+| Fichier | URL Astro |
+|---------|-----------|
+| `src/pages/index.astro` | `/` |
+| `src/pages/admin.astro` | `/admin` → redirect Django `/admin/` |
+| `src/pages/login.astro` | `/login` → redirect Django login |
 
-SCSS 7-1 sous `src/styles/` — tokens Flat High-End, BEM. **Pas de Tailwind.**
+Nouvelle page = nouveau fichier sous `src/pages/`.  
+Nouveau composant = `src/components/*.astro`.  
+Styles = SCSS 7-1 sous `src/styles/` (BEM, tokens `:root`, pas de Tailwind).
+
+## Frontiere
+
+- **Astro** = UI produit / publique.
+- **HTMX Django** = admin DataStudio + back-office (`PUBLIC_DJANGO_URL` + `/admin/`, `/backoffice/`).
+- **Zero React / Next.js.**

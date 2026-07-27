@@ -403,6 +403,20 @@ function New-ProjectReadme {
         [bool]$HasFrontend = $true,
         [bool]$HasDocker = $false
     )
+
+    $scaffoldDir = $PSScriptRoot
+    $fullstackTemplate = Join-Path $scaffoldDir "readme-templates\README.fullstack.md"
+
+    if ($HasFrontend -and (Test-Path -LiteralPath $fullstackTemplate)) {
+        $projectTitle = "Monorepo Django Ninja + Astro + HTMX + uv"
+        if ($HasDocker) { $projectTitle += " + Docker" }
+        $readme = Get-Content -LiteralPath $fullstackTemplate -Raw -Encoding UTF8
+        $readme = $readme.Replace("__PROJECT_TITLE__", $projectTitle)
+        $readme = $readme.Replace("__APP_NAME__", $AppName)
+        Write-TextFile -Path (Join-Path $Root "README.md") -Content $readme
+        return
+    }
+
     $fe = if ($HasFrontend) { @"
 
 ## Frontend (Astro)
@@ -422,7 +436,7 @@ pnpm dev
 Puis ouvrir http://127.0.0.1:4321 (ou http://localhost:4321).
 
 Variables publiques : ``PUBLIC_API_URL`` (health API) et ``PUBLIC_DJANGO_URL`` (liens Django).
-Console admin : ``PUBLIC_DJANGO_URL`` + ``/admin/`` (HTMX, pas Astro).
+Admin DataStudio : ``PUBLIC_DJANGO_URL`` + ``/admin/`` (HTMX, pas Astro).
 Jamais de secrets dans ``PUBLIC_*``.
 "@ } else { "" }
 
@@ -492,7 +506,7 @@ Production : ``docker compose -f docker-compose.prod.yml up --build``
 
 - Backend : http://localhost:8000
 - Frontend Astro : http://localhost:4321
-- Console DataStudio : http://localhost:8000/admin/
+- Admin DataStudio : http://localhost:8000/admin/
 - Connexion staff : http://localhost:8000/accounts/login/
 - Back-office HTMX : http://localhost:8000/backoffice/
 "@
