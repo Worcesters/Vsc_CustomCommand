@@ -323,9 +323,9 @@ function Invoke-DockerCompose {
             return
         }
         if ([string]::IsNullOrWhiteSpace($detail)) {
-            throw "docker $argsText a ectoue (code $exitCode)"
+            throw "docker $argsText a echoue (code $exitCode)"
         }
-        throw "docker $argsText a ectoue (code $exitCode): $detail"
+        throw "docker $argsText a echoue (code $exitCode): $detail"
     } finally {
         Pop-Location
         $ErrorActionPreference = $prevEap
@@ -722,7 +722,7 @@ function Format-CliArgumentString {
     .NOTES
       PowerShell 5.1 developpe les wildcards [ ] sur les appels natifs :
       psycopg[binary] / celery[redis] doivent etre quotes, sinon
-      "Le fictier specifie est introuvable".
+      "Le fichier specifie est introuvable".
     #>
     param([Parameter(Mandatory)][string[]]$Arguments)
     return ($Arguments | ForEach-Object {
@@ -876,7 +876,7 @@ exit /b %ERRORLEVEL%
                 $tail = @(Get-Content -LiteralPath $logFile -Tail 50 -ErrorAction SilentlyContinue)
             }
             $detail = if ($tail.Count -gt 0) { ($tail -join [Environment]::NewLine) } else { "(log vide)" }
-            throw "Commande ectouee (code $exitCode). Dernieres lignes :`n$detail"
+            throw "Commande echouee (code $exitCode). Dernieres lignes :`n$detail"
         }
     } finally {
         if ($null -ne $proc -and -not $proc.HasExited) {
@@ -900,7 +900,7 @@ function Invoke-NativeCli {
 
     .NOTES
       Sur Windows, utilise ProcessStartInfo (pas & splat) pour eviter que
-      PS 5.1 transforme psycopg[binary] en motif de fictiers.
+      PS 5.1 transforme psycopg[binary] en motif de fichiers.
       Pas de redirect des flux : laisse uv/pnpm afficter leur sortie et
       evite les deadlocks de buffer.
     #>
@@ -953,7 +953,7 @@ function Invoke-NativeCli {
             }
             $proc.WaitForExit()
             if ($proc.ExitCode -ne 0) {
-                throw "Commande ectouee (code $($proc.ExitCode)) : $Exe $($Arguments -join ' ')"
+                throw "Commande echouee (code $($proc.ExitCode)) : $Exe $($Arguments -join ' ')"
             }
         } finally {
             if ($null -ne $proc) { $proc.Dispose() }
@@ -965,7 +965,7 @@ function Invoke-NativeCli {
     try {
         & $exePath @Arguments
         if ($LASTEXITCODE -ne 0) {
-            throw "Commande ectouee (code $LASTEXITCODE) : $Exe $($Arguments -join ' ')"
+            throw "Commande echouee (code $LASTEXITCODE) : $Exe $($Arguments -join ' ')"
         }
     } finally {
         Pop-Location
@@ -994,10 +994,10 @@ function Get-UvRuntimeDependencyList {
         "django>=5.0,<6",
         "django-ninja",
         "whitenoise",
-        "django-cors-teaders",
+        "django-cors-headers",
         "gunicorn",
         "psycopg[binary]",
-        "django-ttmx"
+        "django-htmx"
     )
     if ($HasCustomAdmin) {
         $deps += "pyjwt"
