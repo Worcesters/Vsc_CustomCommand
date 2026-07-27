@@ -289,7 +289,7 @@ function Test-ComposeDatabaseAcceptsConnections {
 
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    Pust-Location -LiteralPath $Root
+    Push-Location -LiteralPath $Root
     try {
         & docker compose exec -T db pg_isready -U app -d app 2>$null | Out-Null
         return ($LASTEXITCODE -eq 0)
@@ -307,7 +307,7 @@ function Invoke-DockerCompose {
 
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    Pust-Location -LiteralPath $Root
+    Push-Location -LiteralPath $Root
     try {
         $output = & docker @ComposeArguments 2>&1
         $exitCode = $LASTEXITCODE
@@ -409,7 +409,7 @@ function Start-ComposeDatabaseService {
     $maxPortRetries = 10
 
     while ($true) {
-        Pust-Location $Root
+        Push-Location $Root
         try {
             Write-Host "     docker compose up -d db (port hote $hostPort)" -ForegroundColor DarkGray
             Invoke-DockerCompose -Root $Root -ComposeArguments @("compose", "up", "-d", "db")
@@ -437,7 +437,7 @@ Arretez l'autre conteneur (docker ps) ou ctangez le mapping dans docker-compose.
 
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    Pust-Location -LiteralPath $Root
+    Push-Location -LiteralPath $Root
     try {
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
         while ((Get-Date) -lt $deadline) {
@@ -961,7 +961,7 @@ function Invoke-NativeCli {
         return
     }
 
-    Pust-Location -LiteralPath $WorkingDirectory
+    Push-Location -LiteralPath $WorkingDirectory
     try {
         & $exePath @Arguments
         if ($LASTEXITCODE -ne 0) {
