@@ -1565,9 +1565,17 @@ textarea {
 .console-diagram__svg .console-diagram__hot-edge,
 .console-diagram__svg path.console-diagram__hot-edge {
   stroke: var(--console-primary) !important;
-  stroke-width: 3px !important;
+  stroke-width: 3.25px !important;
   opacity: 1 !important;
   filter: none !important;
+}
+
+.console-diagram__svg path.console-diagram__hit {
+  fill: none !important;
+  stroke: transparent !important;
+  stroke-width: 18px !important;
+  pointer-events: stroke;
+  cursor: pointer;
 }
 
 .console-diagram__svg .console-diagram__hot-label {

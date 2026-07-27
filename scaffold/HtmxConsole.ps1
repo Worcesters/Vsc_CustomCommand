@@ -1018,9 +1018,17 @@ function Get-ConsoleScss {
 .console-diagram__svg .console-diagram__hot-edge,
 .console-diagram__svg path.console-diagram__hot-edge {
   stroke: var(--console-primary) !important;
-  stroke-width: 3px !important;
+  stroke-width: 3.25px !important;
   opacity: 1 !important;
   filter: none !important;
+}
+
+.console-diagram__svg path.console-diagram__hit {
+  fill: none !important;
+  stroke: transparent !important;
+  stroke-width: 18px !important;
+  pointer-events: stroke;
+  cursor: pointer;
 }
 
 .console-diagram__svg .console-diagram__hot-label {
@@ -1729,6 +1737,7 @@ function Write-ConsoleTemplates {
   const source = document.getElementById("console-mermaid");
   const clearBtn = document.getElementById("console-diagram-clear");
   const fksEl = document.getElementById("console-diagram-fks");
+  const HOT = "oklch(0.75 0.14 175)";
 
   if (!root || !host || !source || root.dataset.bound === "1") {
     // no-op (HTMX re-swap / double init)
@@ -1771,9 +1780,18 @@ function Write-ConsoleTemplates {
 
     const textOf = (node) => (node.textContent || "").replace(/\s+/g, " ").trim();
 
+    const isEntityAncestor = (el) =>
+      Boolean(
+        el.closest(
+          "g.entityBox, g.er.entityBox, g.node, g[id*='entity'], g[id*='Entity'], g.cluster",
+        ),
+      );
+
     const findEntityGroups = (svg) => {
       const candidates = [
-        ...svg.querySelectorAll("g.entityBox, g.er.entityBox, g[id*='entity'], g.node"),
+        ...svg.querySelectorAll(
+          "g.entityBox, g.er.entityBox, g.node, g[id*='entity'], g[id*='Entity']",
+        ),
       ];
       const groups = [];
       const seen = new Set();
@@ -1781,7 +1799,6 @@ function Write-ConsoleTemplates {
         if (seen.has(g)) return;
         const texts = [...g.querySelectorAll("text")].map(textOf).filter(Boolean);
         if (!texts.length) return;
-        // Premier texte = nom d'entite Mermaid (souvent UPPER)
         const name = sanitize(texts[0]);
         seen.add(g);
         groups.push({ el: g, name, texts });
@@ -1789,27 +1806,48 @@ function Write-ConsoleTemplates {
       return groups;
     };
 
+    /** Chemins de relation Mermaid 10/11 (classes variables selon le renderer). */
     const findEdgeGroups = (svg) => {
-      const paths = [
+      const preferred = [
         ...svg.querySelectorAll(
-          "path.relationshipLine, path.er.relationshipLine, g.edgePath path, path[class*='relation']",
+          "path.relationshipLine, path.er.relationshipLine, g.edgePath path, " +
+            "g.edgePaths path, g.edges path, path[class*='relation'], path[class*='edge']",
         ),
       ];
-      return paths.map((path) => {
-        const group = path.closest("g") || path;
-        return { path, group };
+      const fallback = [...svg.querySelectorAll("path")].filter((path) => {
+        if (isEntityAncestor(path)) return false;
+        const cls = String(path.getAttribute("class") || "");
+        if (/marker|background|outline|entity/i.test(cls)) return false;
+        try {
+          const len = typeof path.getTotalLength === "function" ? path.getTotalLength() : 0;
+          const box = path.getBBox();
+          return len > 12 || box.width > 8 || box.height > 8;
+        } catch {
+          return true;
+        }
       });
+      const paths = preferred.length ? preferred : fallback;
+      const uniq = [];
+      const seen = new Set();
+      paths.forEach((path) => {
+        if (seen.has(path)) return;
+        seen.add(path);
+        const group = path.closest("g.edgePath, g.edgePaths, g.edges, g[id*='edge'], g") || path;
+        uniq.push({ path, group });
+      });
+      return uniq;
     };
 
     const matchEdgeToFk = (edgeGroup, entityNames) => {
       const labelText = textOf(edgeGroup.group).toLowerCase();
-      // Cherche un label de colonne dans le groupe
       for (const e of edges) {
-        if (labelText.includes(e.fromCol) || labelText.includes(e.label.toLowerCase())) {
+        if (
+          (e.fromCol && labelText.includes(e.fromCol)) ||
+          (e.label && labelText.includes(e.label.toLowerCase()))
+        ) {
           return e;
         }
       }
-      // Fallback: distance visuelle centre path <-> centres entities
       try {
         const pb = edgeGroup.path.getBBox();
         const pcx = pb.x + pb.width / 2;
@@ -1826,7 +1864,6 @@ function Write-ConsoleTemplates {
           const acy = ab.y + ab.height / 2;
           const bcx = bb.x + bb.width / 2;
           const bcy = bb.y + bb.height / 2;
-          // distance au segment
           const dx = bcx - acx;
           const dy = bcy - acy;
           const len2 = dx * dx + dy * dy || 1;
@@ -1842,16 +1879,36 @@ function Write-ConsoleTemplates {
         }
         return best;
       } catch {
-        return null;
+        return edges[0] || null;
       }
     };
 
     let activeKey = null;
 
+    const paintEdge = (path, hot) => {
+      if (hot) {
+        path.classList.add("console-diagram__hot-edge");
+        path.classList.remove("console-diagram__dim");
+        path.style.setProperty("stroke", HOT, "important");
+        path.style.setProperty("stroke-width", "3.25px", "important");
+        path.style.setProperty("opacity", "1", "important");
+        path.setAttribute("stroke", HOT);
+      } else {
+        path.classList.add("console-diagram__dim");
+        path.classList.remove("console-diagram__hot-edge");
+        path.style.removeProperty("stroke");
+        path.style.removeProperty("stroke-width");
+        path.style.setProperty("opacity", "0.18", "important");
+      }
+    };
+
     const clearHighlight = (svg) => {
       activeKey = null;
       svg.classList.remove("console-diagram__svg--focus");
-      svg.querySelectorAll(".console-diagram__dim, .console-diagram__hot, .console-diagram__hot-edge, .console-diagram__hot-label")
+      svg
+        .querySelectorAll(
+          ".console-diagram__dim, .console-diagram__hot, .console-diagram__hot-edge, .console-diagram__hot-label",
+        )
         .forEach((n) => {
           n.classList.remove(
             "console-diagram__dim",
@@ -1859,6 +1916,11 @@ function Write-ConsoleTemplates {
             "console-diagram__hot-edge",
             "console-diagram__hot-label",
           );
+          if (n.tagName && n.tagName.toLowerCase() === "path") {
+            n.style.removeProperty("stroke");
+            n.style.removeProperty("stroke-width");
+            n.style.removeProperty("opacity");
+          }
         });
       if (clearBtn) clearBtn.hidden = true;
     };
@@ -1869,35 +1931,42 @@ function Write-ConsoleTemplates {
       const edgeGroups = findEdgeGroups(svg);
 
       entityMap.forEach((el, name) => {
-        if (hotEntities.has(name)) el.classList.add("console-diagram__hot");
-        else el.classList.add("console-diagram__dim");
+        if (hotEntities.has(name)) {
+          el.classList.add("console-diagram__hot");
+          el.classList.remove("console-diagram__dim");
+        } else {
+          el.classList.add("console-diagram__dim");
+          el.classList.remove("console-diagram__hot");
+        }
       });
 
       edgeGroups.forEach((eg) => {
         const fk = matchEdgeToFk(eg, entityMap);
         const isHot =
-          fk &&
+          Boolean(fk) &&
           hotEdges.some(
             (h) => h.from === fk.from && h.to === fk.to && h.fromCol === fk.fromCol,
           );
-        if (isHot) {
-          eg.path.classList.add("console-diagram__hot-edge");
-          eg.group.classList.add("console-diagram__hot-edge");
-        } else {
-          eg.path.classList.add("console-diagram__dim");
-          eg.group.classList.add("console-diagram__dim");
-        }
+        paintEdge(eg.path, isHot);
+        if (isHot) eg.group.classList.add("console-diagram__hot-edge");
+        else eg.group.classList.add("console-diagram__dim");
       });
 
-      // Labels de relation (texte hors entity)
       svg.querySelectorAll("text").forEach((t) => {
-        if (t.closest("g.entityBox, g.er.entityBox, g[id*='entity'], g.node")) return;
+        if (isEntityAncestor(t)) return;
         const raw = textOf(t).toLowerCase();
         const hot = hotEdges.some(
-          (e) => raw.includes(e.fromCol) || raw.includes(e.label.toLowerCase()),
+          (e) =>
+            (e.fromCol && raw.includes(e.fromCol)) ||
+            (e.label && raw.includes(e.label.toLowerCase())),
         );
-        if (hot) t.classList.add("console-diagram__hot-label");
-        else t.classList.add("console-diagram__dim");
+        if (hot) {
+          t.classList.add("console-diagram__hot-label");
+          t.classList.remove("console-diagram__dim");
+        } else {
+          t.classList.add("console-diagram__dim");
+          t.classList.remove("console-diagram__hot-label");
+        }
       });
 
       if (clearBtn) clearBtn.hidden = false;
@@ -1909,12 +1978,9 @@ function Write-ConsoleTemplates {
         clearHighlight(svg);
         return;
       }
-      activeKey = key;
-      const hotEntities = neighborsOf(entity);
-      const hotEdges = edgesForEntity(entity);
       clearHighlight(svg);
       activeKey = key;
-      applyHighlight(svg, hotEntities, hotEdges);
+      applyHighlight(svg, neighborsOf(entity), edgesForEntity(entity));
     };
 
     const selectEdge = (svg, fk) => {
@@ -1924,7 +1990,6 @@ function Write-ConsoleTemplates {
         clearHighlight(svg);
         return;
       }
-      activeKey = key;
       clearHighlight(svg);
       activeKey = key;
       applyHighlight(svg, new Set([fk.from, fk.to]), [fk]);
@@ -1951,22 +2016,39 @@ function Write-ConsoleTemplates {
       applyHighlight(svg, hotEntities, related);
     };
 
+    const addHitArea = (path, onClick) => {
+      path.style.cursor = "pointer";
+      path.style.pointerEvents = "stroke";
+      const hit = path.cloneNode(false);
+      hit.removeAttribute("marker-end");
+      hit.removeAttribute("marker-start");
+      hit.classList.add("console-diagram__hit");
+      hit.setAttribute("fill", "none");
+      hit.setAttribute("stroke", "transparent");
+      hit.setAttribute("stroke-width", "18");
+      hit.style.cursor = "pointer";
+      hit.style.pointerEvents = "stroke";
+      hit.addEventListener("click", onClick);
+      path.parentNode && path.parentNode.insertBefore(hit, path);
+      path.addEventListener("click", onClick);
+    };
+
     const wireSvg = (svg) => {
       svg.classList.add("console-diagram__svg");
       const groups = findEntityGroups(svg);
       const entityMap = new Map(groups.map((g) => [g.name, g.el]));
+      const edgeGroups = findEdgeGroups(svg);
 
       groups.forEach(({ el, name }) => {
         el.style.cursor = "pointer";
+        el.style.pointerEvents = "all";
         el.addEventListener("click", (ev) => {
           ev.stopPropagation();
           const target = ev.target;
-          // Clic sur un attribut / colonne
           if (target && target.tagName && target.tagName.toLowerCase() === "text") {
             const label = textOf(target);
-            // Ignore le titre d'entite
             if (sanitize(label) !== name) {
-              const colGuess = label.split(/\s+/).pop() || label;
+              const colGuess = label.replace(/[^A-Za-z0-9_]+/g, " ").trim().split(/\s+/).pop() || label;
               selectColumn(svg, colGuess, name);
               return;
             }
@@ -1975,20 +2057,38 @@ function Write-ConsoleTemplates {
         });
       });
 
-      findEdgeGroups(svg).forEach((eg) => {
-        eg.path.style.cursor = "pointer";
-        eg.group.style.cursor = "pointer";
+      edgeGroups.forEach((eg) => {
         const handler = (ev) => {
+          ev.preventDefault();
           ev.stopPropagation();
-          selectEdge(svg, matchEdgeToFk(eg, entityMap));
+          let fk = matchEdgeToFk(eg, entityMap);
+          if (!fk && edges.length === 1) fk = edges[0];
+          selectEdge(svg, fk);
         };
-        eg.path.addEventListener("click", handler);
+        addHitArea(eg.path, handler);
+        eg.group.style.cursor = "pointer";
         eg.group.addEventListener("click", handler);
       });
 
-      svg.addEventListener("click", () => clearHighlight(svg));
+      svg.addEventListener("click", (ev) => {
+        if (ev.target === svg || ev.target.classList?.contains("console-diagram__viewport")) {
+          clearHighlight(svg);
+        }
+      });
       if (clearBtn) {
-        clearBtn.addEventListener("click", () => clearHighlight(svg));
+        clearBtn.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          clearHighlight(svg);
+        });
+      }
+
+      // Debug discret si aucun trait detecte
+      if (!edgeGroups.length && edges.length) {
+        console.warn(
+          "[console-diagram] Aucun path de relation detecte dans le SVG Mermaid (",
+          edges.length,
+          "FK connues).",
+        );
       }
     };
 
@@ -2021,7 +2121,8 @@ function Write-ConsoleTemplates {
           wrap.appendChild(imported);
           host.innerHTML = "";
           host.appendChild(wrap);
-          wireSvg(imported);
+          // Attendre layout pour getBBox fiable
+          requestAnimationFrame(() => wireSvg(imported));
         } else {
           throw new Error("SVG invalide");
         }
