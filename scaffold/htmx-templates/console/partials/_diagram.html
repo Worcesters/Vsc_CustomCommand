@@ -3,8 +3,9 @@
     <div>
       <h3 class="console-structure__title">Diagramme Mermaid (ER)</h3>
       <p class="console-diagram__hint">
-        Cliquez une <strong>table</strong>, une <strong>colonne</strong> ou un <strong>lien</strong>
-        pour surligner le trait et les tables connectees.
+        Cliquez une <strong>table</strong>, une <strong>colonne FK</strong> ou un <strong>lien</strong>
+        pour colorer le trait. La recherche n'affiche que la table et ses voisins directs.
+        <strong>Molette</strong> : zoom &middot; <strong>Clic droit maintenu</strong> : deplacer le graphe.
       </p>
     </div>
     <button type="button" class="console-btn console-btn--ghost console-btn--sm" id="console-diagram-clear" hidden>
@@ -26,10 +27,9 @@
   const source = document.getElementById("console-mermaid");
   const clearBtn = document.getElementById("console-diagram-clear");
   const fksEl = document.getElementById("console-diagram-fks");
-  const HOT = "oklch(0.75 0.14 175)";
 
   if (!root || !host || !source || root.dataset.bound === "1") {
-    // no-op (HTMX re-swap / double init)
+    // HTMX / double init
   } else {
     root.dataset.bound = "1";
 
@@ -41,14 +41,71 @@
       return cleaned.toUpperCase().slice(0, 48);
     };
 
+    const readPrimary = () => {
+      const scope = root.closest(".console") || root;
+      const raw = getComputedStyle(scope).getPropertyValue("--console-primary").trim();
+      return raw || "oklch(0.75 0.14 175)";
+    };
+
+    const readPrimaryOn = () => {
+      const scope = root.closest(".console") || root;
+      const raw = getComputedStyle(scope).getPropertyValue("--console-primary-on").trim();
+      return raw || "oklch(0.16 0.02 260)";
+    };
+
+    const textOf = (node) => (node.textContent || "").replace(/\s+/g, " ").trim();
+
+    const fullSource = (source.textContent || "").trim();
+
+    const parseEntityBlocks = (body) => {
+      const map = new Map();
+      const re = /([A-Za-z0-9_]+)\s*\{([^}]*)\}/g;
+      let m;
+      while ((m = re.exec(body))) {
+        map.set(sanitize(m[1]), `    ${sanitize(m[1])} {${m[2]}}`);
+      }
+      return map;
+    };
+
+    const parseRelationLines = (body) => {
+      const out = [];
+      const re =
+        /([A-Za-z0-9_]+)\s+([|}o{\-]+--+[|}o{\-]+)\s+([A-Za-z0-9_]+)\s*:\s*([A-Za-z0-9_]+)/g;
+      let m;
+      while ((m = re.exec(body))) {
+        out.push({
+          from: sanitize(m[1]),
+          op: m[2],
+          to: sanitize(m[3]),
+          label: sanitize(m[4]),
+          line: `    ${sanitize(m[1])} ${m[2]} ${sanitize(m[3])} : ${sanitize(m[4])}`,
+        });
+      }
+      return out;
+    };
+
+    const entityBlocks = parseEntityBlocks(fullSource);
+    const relationLines = parseRelationLines(fullSource);
+
     const fksRaw = fksEl ? JSON.parse(fksEl.textContent || "[]") : [];
-    const edges = fksRaw.map((fk) => ({
+    let edges = fksRaw.map((fk) => ({
       from: sanitize(fk.from_table),
       to: sanitize(fk.to_table),
       fromCol: String(fk.from_column || "").toLowerCase(),
       toCol: String(fk.to_column || "").toLowerCase(),
       label: sanitize(fk.from_column),
     }));
+    if (!edges.length) {
+      edges = relationLines.map((r) => ({
+        from: r.from,
+        to: r.to,
+        fromCol: r.label.toLowerCase(),
+        toCol: "",
+        label: r.label,
+      }));
+    }
+
+    const allEntityNames = [...entityBlocks.keys()];
 
     const neighborsOf = (entity) => {
       const set = new Set([entity]);
@@ -58,77 +115,181 @@
       });
       return set;
     };
-
     const edgesForEntity = (entity) =>
       edges.filter((e) => e.from === entity || e.to === entity);
-
     const edgesForColumn = (colName) => {
       const key = String(colName || "").toLowerCase();
       return edges.filter((e) => e.fromCol === key || e.toCol === key);
     };
 
-    const textOf = (node) => (node.textContent || "").replace(/\s+/g, " ").trim();
+    const resolveKeepSet = (q) => {
+      const qq = String(q || "").trim().toLowerCase();
+      if (!qq) return null;
+      const matched = allEntityNames.filter((n) => n.toLowerCase().includes(qq));
+      if (!matched.length) return new Set();
+      const keep = new Set();
+      matched.forEach((name) => {
+        neighborsOf(name).forEach((n) => keep.add(n));
+      });
+      return keep;
+    };
 
-    const isEntityAncestor = (el) =>
-      Boolean(
-        el.closest(
-          "g.entityBox, g.er.entityBox, g.node, g[id*='entity'], g[id*='Entity'], g.cluster",
-        ),
-      );
+    const buildMermaidBody = (keep) => {
+      if (!keep) return fullSource;
+      if (!keep.size) {
+        return "erDiagram\n    NO_MATCH {\n        text empty\n    }";
+      }
+      const lines = ["erDiagram"];
+      keep.forEach((name) => {
+        if (entityBlocks.has(name)) lines.push(entityBlocks.get(name));
+      });
+      relationLines.forEach((r) => {
+        if (keep.has(r.from) && keep.has(r.to)) lines.push(r.line);
+      });
+      return lines.join("\n");
+    };
+
+    const isInsideEntity = (el) => Boolean(el.closest(".console-diagram__entity"));
+
+    // Mermaid 11 : id = "...-entity-NOM_TABLE-N" ou "entity-NOM_TABLE-N"
+    const entityNameFromId = (g) => {
+      const id = g.getAttribute("id") || "";
+      const m = id.match(/entity-([A-Za-z0-9_]+)-\d+$/i);
+      return m ? sanitize(m[1]) : "";
+    };
+
+    const entityLabelFromNode = (g) => {
+      const p = g.querySelector(".label.name .nodeLabel p, .label.name p, .nodeLabel p");
+      if (p && p.textContent) return sanitize(p.textContent);
+      const fo = g.querySelector("foreignObject");
+      if (fo && fo.textContent) {
+        const first = fo.textContent.trim().split(/\s+/)[0];
+        return sanitize(first);
+      }
+      return "";
+    };
 
     const findEntityGroups = (svg) => {
-      const candidates = [
-        ...svg.querySelectorAll(
-          "g.entityBox, g.er.entityBox, g.node, g[id*='entity'], g[id*='Entity']",
-        ),
+      let candidates = [
+        ...svg.querySelectorAll("g.node[id*='entity-'], g[id*='entity-']"),
       ];
+      if (!candidates.length) {
+        [...svg.querySelectorAll("g.node")].forEach((g) => candidates.push(g));
+      }
+      candidates = candidates.filter((g) => {
+        if (!g.querySelector("path, rect, polygon")) return false;
+        // Mermaid 11 : labels en foreignObject, pas en <text>
+        return Boolean(
+          g.querySelector("foreignObject, text, .nodeLabel, .label"),
+        );
+      });
       const groups = [];
       const seen = new Set();
       candidates.forEach((g) => {
         if (seen.has(g)) return;
-        const texts = [...g.querySelectorAll("text")].map(textOf).filter(Boolean);
-        if (!texts.length) return;
-        const name = sanitize(texts[0]);
+        if (candidates.some((other) => other !== g && g.contains(other))) return;
+        const name = entityNameFromId(g) || entityLabelFromNode(g);
+        if (!name) return;
         seen.add(g);
-        groups.push({ el: g, name, texts });
+        const textNodes = [
+          ...g.querySelectorAll("text, .nodeLabel p, .attribute-name p"),
+        ];
+        groups.push({
+          el: g,
+          name,
+          texts: textNodes.map(textOf).filter(Boolean),
+          textNodes,
+        });
       });
       return groups;
     };
 
-    /** Chemins de relation Mermaid 10/11 (classes variables selon le renderer). */
-    const findEdgeGroups = (svg) => {
+    const findEdgePaths = (svg) => {
+      // Uniquement les traits visibles (jamais les hit-areas transparentes)
       const preferred = [
-        ...svg.querySelectorAll(
-          "path.relationshipLine, path.er.relationshipLine, g.edgePath path, " +
-            "g.edgePaths path, g.edges path, path[class*='relation'], path[class*='edge']",
-        ),
-      ];
-      const fallback = [...svg.querySelectorAll("path")].filter((path) => {
-        if (isEntityAncestor(path)) return false;
-        const cls = String(path.getAttribute("class") || "");
-        if (/marker|background|outline|entity/i.test(cls)) return false;
+        ...svg.querySelectorAll("path.relationshipLine, g.edgePaths > path"),
+      ].filter(
+        (p) =>
+          !p.classList.contains("console-diagram__hit") &&
+          !isInsideEntity(p),
+      );
+      if (preferred.length) return preferred;
+
+      let svgArea = 1;
+      try {
+        const b = svg.getBBox();
+        svgArea = Math.max(1, b.width * b.height);
+      } catch {
+        /* ignore */
+      }
+      return [...svg.querySelectorAll("path, line")].filter((path) => {
+        if (path.classList.contains("console-diagram__hit")) return false;
+        if (isInsideEntity(path)) return false;
+        const cls = `${path.getAttribute("class") || ""} ${path.getAttribute("id") || ""}`;
+        if (/marker|background|outline|entityBox|brush/i.test(cls)) return false;
         try {
-          const len = typeof path.getTotalLength === "function" ? path.getTotalLength() : 0;
           const box = path.getBBox();
-          return len > 12 || box.width > 8 || box.height > 8;
+          const area = box.width * box.height;
+          if (area > svgArea * 0.3) return false;
+          if (path.tagName.toLowerCase() === "line") {
+            return Math.hypot(box.width, box.height) > 10;
+          }
+          const len = typeof path.getTotalLength === "function" ? path.getTotalLength() : 0;
+          return len >= 12;
         } catch {
-          return true;
+          return false;
         }
       });
-      const paths = preferred.length ? preferred : fallback;
-      const uniq = [];
-      const seen = new Set();
-      paths.forEach((path) => {
-        if (seen.has(path)) return;
-        seen.add(path);
-        const group = path.closest("g.edgePath, g.edgePaths, g.edges, g[id*='edge'], g") || path;
-        uniq.push({ path, group });
-      });
-      return uniq;
     };
 
-    const matchEdgeToFk = (edgeGroup, entityNames) => {
-      const labelText = textOf(edgeGroup.group).toLowerCase();
+    /** Bordures de table Mermaid 11 = paths avec stroke (pas des rect). */
+    const entityBorderPaths = (entityEl) =>
+      [...entityEl.querySelectorAll("path")].filter((p) => {
+        const stroke = p.getAttribute("stroke");
+        if (!stroke || stroke === "none" || stroke === "transparent") return false;
+        if (p.classList.contains("console-diagram__hit")) return false;
+        return true;
+      });
+
+    const entityFillPaths = (entityEl) =>
+      [...entityEl.querySelectorAll("g.outer-path > path[fill], path")].filter((p) => {
+        const fill = p.getAttribute("fill");
+        const stroke = p.getAttribute("stroke");
+        if (!fill || fill === "none") return false;
+        if (stroke && stroke !== "none") return false;
+        // Prefer the outer body fill
+        return p.closest("g.outer-path") || p.parentElement === entityEl;
+      });
+
+    const fkFromEdgeEl = (path) => {
+      const raw =
+        path.getAttribute("data-id") ||
+        path.getAttribute("id") ||
+        "";
+      const m = raw.match(
+        /entity-([A-Za-z0-9_]+)-\d+_entity-([A-Za-z0-9_]+)-\d+/i,
+      );
+      if (!m) return null;
+      return {
+        from: sanitize(m[1]),
+        to: sanitize(m[2]),
+        fromCol: "",
+        toCol: "",
+        label: "",
+      };
+    };
+
+    const centerOf = (el) => {
+      const b = el.getBBox();
+      return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    };
+
+    const matchEdgeToFk = (path, entityMap) => {
+      const fromId = fkFromEdgeEl(path);
+      if (fromId) return fromId;
+
+      const parent = path.parentNode;
+      const labelText = parent ? textOf(parent).toLowerCase() : "";
       for (const e of edges) {
         if (
           (e.fromCol && labelText.includes(e.fromCol)) ||
@@ -138,29 +299,23 @@
         }
       }
       try {
-        const pb = edgeGroup.path.getBBox();
-        const pcx = pb.x + pb.width / 2;
-        const pcy = pb.y + pb.height / 2;
+        const p = centerOf(path);
         let best = null;
         let bestScore = Infinity;
         for (const e of edges) {
-          const a = entityNames.get(e.from);
-          const b = entityNames.get(e.to);
+          const a = entityMap.get(e.from);
+          const b = entityMap.get(e.to);
           if (!a || !b) continue;
-          const ab = a.getBBox();
-          const bb = b.getBBox();
-          const acx = ab.x + ab.width / 2;
-          const acy = ab.y + ab.height / 2;
-          const bcx = bb.x + bb.width / 2;
-          const bcy = bb.y + bb.height / 2;
-          const dx = bcx - acx;
-          const dy = bcy - acy;
+          const ac = centerOf(a);
+          const bc = centerOf(b);
+          const dx = bc.x - ac.x;
+          const dy = bc.y - ac.y;
           const len2 = dx * dx + dy * dy || 1;
-          let t = ((pcx - acx) * dx + (pcy - acy) * dy) / len2;
+          let t = ((p.x - ac.x) * dx + (p.y - ac.y) * dy) / len2;
           t = Math.max(0, Math.min(1, t));
-          const qx = acx + t * dx;
-          const qy = acy + t * dy;
-          const dist = (pcx - qx) ** 2 + (pcy - qy) ** 2;
+          const qx = ac.x + t * dx;
+          const qy = ac.y + t * dy;
+          const dist = (p.x - qx) ** 2 + (p.y - qy) ** 2;
           if (dist < bestScore) {
             bestScore = dist;
             best = e;
@@ -172,92 +327,309 @@
       }
     };
 
-    let activeKey = null;
-
-    const paintEdge = (path, hot) => {
-      if (hot) {
-        path.classList.add("console-diagram__hot-edge");
-        path.classList.remove("console-diagram__dim");
-        path.style.setProperty("stroke", HOT, "important");
-        path.style.setProperty("stroke-width", "3.25px", "important");
-        path.style.setProperty("opacity", "1", "important");
-        path.setAttribute("stroke", HOT);
-      } else {
-        path.classList.add("console-diagram__dim");
-        path.classList.remove("console-diagram__hot-edge");
-        path.style.removeProperty("stroke");
-        path.style.removeProperty("stroke-width");
-        path.style.setProperty("opacity", "0.18", "important");
+    const nearestEntities = (path, entityMap) => {
+      try {
+        const p = centerOf(path);
+        const ranked = [...entityMap.entries()]
+          .map(([name, el]) => {
+            const c = centerOf(el);
+            return { name, d: (c.x - p.x) ** 2 + (c.y - p.y) ** 2 };
+          })
+          .sort((a, b) => a.d - b.d);
+        if (ranked.length >= 2) {
+          return {
+            from: ranked[0].name,
+            to: ranked[1].name,
+            fromCol: "",
+            toCol: "",
+            label: "",
+          };
+        }
+      } catch {
+        /* ignore */
       }
+      return null;
+    };
+
+    let activeKey = null;
+    let hotColor = readPrimary();
+    let renderToken = 0;
+    let debounceTimer = null;
+    let lastFilterQ = "";
+
+    const rememberOrig = (el, attrs) => {
+      attrs.forEach((name) => {
+        const key = `data-orig-${name}`;
+        if (el.hasAttribute(key)) return;
+        const val = el.getAttribute(name);
+        el.setAttribute(key, val == null ? "" : val);
+      });
+    };
+
+    const restoreOrig = (el) => {
+      ["stroke", "stroke-width", "fill", "opacity"].forEach((name) => {
+        const key = `data-orig-${name}`;
+        if (!el.hasAttribute(key)) return;
+        const val = el.getAttribute(key);
+        if (val === "") el.removeAttribute(name);
+        else el.setAttribute(name, val);
+        el.removeAttribute(key);
+      });
+      if (el.hasAttribute("data-orig-color")) {
+        const c = el.getAttribute("data-orig-color");
+        if (c === "") el.style.removeProperty("color");
+        else el.style.color = c;
+        el.removeAttribute("data-orig-color");
+      }
+      ["stroke", "stroke-width", "opacity", "fill", "font-weight", "filter", "color"].forEach((p) =>
+        el.style.removeProperty(p),
+      );
+    };
+
+    // Couleur uniquement — ne pas changer stroke-width (sinon markers/points grossissent)
+    const setStrokeColor = (el, color) => {
+      rememberOrig(el, ["stroke", "stroke-width"]);
+      el.style.setProperty("stroke", color, "important");
+      el.style.setProperty("opacity", "1", "important");
+      el.setAttribute("stroke", color);
+    };
+
+    const setFill = (el, color) => {
+      rememberOrig(el, ["fill"]);
+      el.style.setProperty("fill", color, "important");
+      el.setAttribute("fill", color);
     };
 
     const clearHighlight = (svg) => {
       activeKey = null;
       svg.classList.remove("console-diagram__svg--focus");
+      svg.querySelectorAll("[data-console-hot], [data-console-target]").forEach((n) => {
+        restoreOrig(n);
+        n.removeAttribute("data-console-hot");
+        n.removeAttribute("data-console-target");
+      });
       svg
         .querySelectorAll(
-          ".console-diagram__dim, .console-diagram__hot, .console-diagram__hot-edge, .console-diagram__hot-label",
+          ".console-diagram__dim, .console-diagram__hot, .console-diagram__hot-edge, .console-diagram__hot-border, .console-diagram__hot-label, .console-diagram__hot-fk",
         )
         .forEach((n) => {
+          restoreOrig(n);
           n.classList.remove(
             "console-diagram__dim",
             "console-diagram__hot",
             "console-diagram__hot-edge",
+            "console-diagram__hot-border",
             "console-diagram__hot-label",
+            "console-diagram__hot-fk",
           );
-          if (n.tagName && n.tagName.toLowerCase() === "path") {
-            n.style.removeProperty("stroke");
-            n.style.removeProperty("stroke-width");
-            n.style.removeProperty("opacity");
-          }
         });
       if (clearBtn) clearBtn.hidden = true;
     };
 
-    const applyHighlight = (svg, hotEntities, hotEdges) => {
-      svg.classList.add("console-diagram__svg--focus");
-      const entityMap = new Map(findEntityGroups(svg).map((g) => [g.name, g.el]));
-      const edgeGroups = findEdgeGroups(svg);
+    const enrichFk = (fk) => {
+      if (!fk) return null;
+      if (fk.fromCol || fk.toCol) return fk;
+      const hit = edges.find(
+        (e) =>
+          (e.from === fk.from && e.to === fk.to) ||
+          (e.from === fk.to && e.to === fk.from),
+      );
+      if (!hit) return fk;
+      return {
+        ...fk,
+        fromCol: hit.fromCol || "",
+        toCol: hit.toCol || "",
+        label: hit.label || fk.label || "",
+      };
+    };
 
-      entityMap.forEach((el, name) => {
-        if (hotEntities.has(name)) {
-          el.classList.add("console-diagram__hot");
-          el.classList.remove("console-diagram__dim");
+    const highlightFkColumns = (entityGroups, hotEdges, targetEntities = new Set()) => {
+      const colKeys = new Set();
+      hotEdges.forEach((raw) => {
+        const e = enrichFk(raw) || raw;
+        if (e.fromCol) colKeys.add(String(e.fromCol).toLowerCase());
+        if (e.toCol) colKeys.add(String(e.toCol).toLowerCase());
+        if (e.label) colKeys.add(String(e.label).toLowerCase());
+      });
+      if (!colKeys.size) return;
+
+      const paintLabel = (node, color) => {
+        node.classList.add("console-diagram__hot-fk");
+        node.setAttribute("data-console-hot", "1");
+        if (!node.hasAttribute("data-orig-color")) {
+          node.setAttribute("data-orig-color", node.style.color || "");
+        }
+        node.style.setProperty("color", color, "important");
+        node.style.setProperty("font-weight", "700", "important");
+        if (node.tagName && node.tagName.toLowerCase() === "text") {
+          setFill(node, color);
+        }
+      };
+
+      entityGroups.forEach((g) => {
+        const fkColor = targetEntities.has(g.name) ? readPrimaryOn() : hotColor;
+
+        // Mermaid 11 : colonnes = .label.attribute-name > foreignObject > p
+        const attrLabels = [
+          ...g.el.querySelectorAll(
+            ".label.attribute-name .nodeLabel p, .label.attribute-name p, .attribute-name p",
+          ),
+        ];
+        attrLabels.forEach((p) => {
+          const name = (p.textContent || "").trim().toLowerCase();
+          if (!name || !colKeys.has(name)) return;
+          paintLabel(p, fkColor);
+          // Colorer aussi le type sur la meme ligne (sibling attribute-type proche)
+          const row = p.closest("g.label");
+          if (row && row.parentElement) {
+            // Pas de lien DOM direct type/name ; on colore uniquement le nom FK
+          }
+        });
+
+        // Fallback SVG <text> (anciens renderers)
+        g.textNodes.forEach((tNode, idx) => {
+          if (idx === 0) return;
+          const raw = textOf(tNode).toLowerCase();
+          const tokens = raw.split(/[^a-z0-9_]+/).filter(Boolean);
+          const last = tokens[tokens.length - 1] || "";
+          const hit = [...colKeys].some(
+            (c) => c && (last === c || tokens.includes(c)),
+          );
+          if (!hit) return;
+          paintLabel(tNode, fkColor);
+        });
+      });
+    };
+
+    const pathNearHotEdge = (path, entityMap, hotEdges) => {
+      try {
+        const p = centerOf(path);
+        return hotEdges.some((h) => {
+          const a = entityMap.get(h.from);
+          const b = entityMap.get(h.to);
+          if (!a || !b) return false;
+          const ac = centerOf(a);
+          const bc = centerOf(b);
+          const mid = { x: (ac.x + bc.x) / 2, y: (ac.y + bc.y) / 2 };
+          return (mid.x - p.x) ** 2 + (mid.y - p.y) ** 2 < 16000;
+        });
+      } catch {
+        return false;
+      }
+    };
+
+    const paintEntity = (g, { isTarget }) => {
+      g.el.classList.add("console-diagram__hot");
+      g.el.classList.remove("console-diagram__dim");
+      g.el.setAttribute("data-console-hot", "1");
+
+      // Mermaid 11 : bordures = paths stroke="#ccc" (pas des rect)
+      entityBorderPaths(g.el).forEach((p) => {
+        p.setAttribute("data-console-hot", "1");
+        p.classList.add("console-diagram__hot-border");
+        setStrokeColor(p, hotColor);
+      });
+
+      // Fallback legacy rect
+      g.el.querySelectorAll("rect").forEach((r) => {
+        r.setAttribute("data-console-hot", "1");
+        setStrokeColor(r, hotColor);
+        if (isTarget) setFill(r, hotColor);
+      });
+
+      if (isTarget) {
+        g.el.setAttribute("data-console-target", "1");
+        const fills = entityFillPaths(g.el);
+        (fills.length ? fills : [...g.el.querySelectorAll("g.outer-path > path")].slice(0, 1)).forEach(
+          (p) => {
+            p.setAttribute("data-console-hot", "1");
+            setFill(p, hotColor);
+          },
+        );
+        g.el.querySelectorAll(".nodeLabel p, text").forEach((t) => {
+          t.setAttribute("data-console-hot", "1");
+          if (!t.hasAttribute("data-orig-color")) {
+            t.setAttribute("data-orig-color", t.style.color || "");
+          }
+          t.style.setProperty("color", readPrimaryOn(), "important");
+          if (t.tagName && t.tagName.toLowerCase() === "text") setFill(t, readPrimaryOn());
+        });
+      } else {
+        g.el.removeAttribute("data-console-target");
+      }
+    };
+
+    const paintEdgePath = (path) => {
+      if (!path || path.classList.contains("console-diagram__hit")) return;
+      path.classList.remove("console-diagram__dim");
+      path.classList.add("console-diagram__hot-edge");
+      path.setAttribute("data-console-hot", "1");
+      // Couleur seule — garder le stroke-width Mermaid (evite markers qui grossissent)
+      setStrokeColor(path, hotColor);
+      path.style.setProperty("fill", "none", "important");
+    };
+
+    const applyHighlight = (
+      svg,
+      hotEntities,
+      hotEdges,
+      targetEntities = new Set(),
+      forcePaths = [],
+    ) => {
+      hotColor = readPrimary();
+      svg.classList.add("console-diagram__svg--focus");
+      const entityGroups = findEntityGroups(svg);
+      const entityMap = new Map(entityGroups.map((g) => [g.name, g.el]));
+      const edgePaths = findEdgePaths(svg);
+
+      entityGroups.forEach((g) => {
+        const isTarget = targetEntities.has(g.name);
+        const hot = isTarget || hotEntities.has(g.name);
+        if (hot) {
+          paintEntity(g, { isTarget });
         } else {
-          el.classList.add("console-diagram__dim");
-          el.classList.remove("console-diagram__hot");
+          g.el.classList.add("console-diagram__dim");
+          g.el.classList.remove("console-diagram__hot");
         }
       });
 
-      edgeGroups.forEach((eg) => {
-        const fk = matchEdgeToFk(eg, entityMap);
+      const forceSet = new Set(
+        forcePaths
+          .map((p) => {
+            if (!p) return null;
+            if (p.classList && p.classList.contains("console-diagram__hit")) {
+              const idx = p.getAttribute("data-console-edge");
+              return idx != null ? edgePaths[Number(idx)] : null;
+            }
+            return p;
+          })
+          .filter(Boolean),
+      );
+
+      edgePaths.forEach((path) => {
+        if (forceSet.has(path)) return;
+        let fk = matchEdgeToFk(path, entityMap);
+        if (!fk && hotEdges.length === 1) fk = hotEdges[0];
         const isHot =
           Boolean(fk) &&
           hotEdges.some(
-            (h) => h.from === fk.from && h.to === fk.to && h.fromCol === fk.fromCol,
+            (h) =>
+              (h.from === fk.from && h.to === fk.to) ||
+              (h.from === fk.to && h.to === fk.from),
           );
-        paintEdge(eg.path, isHot);
-        if (isHot) eg.group.classList.add("console-diagram__hot-edge");
-        else eg.group.classList.add("console-diagram__dim");
-      });
-
-      svg.querySelectorAll("text").forEach((t) => {
-        if (isEntityAncestor(t)) return;
-        const raw = textOf(t).toLowerCase();
-        const hot = hotEdges.some(
-          (e) =>
-            (e.fromCol && raw.includes(e.fromCol)) ||
-            (e.label && raw.includes(e.label.toLowerCase())),
-        );
-        if (hot) {
-          t.classList.add("console-diagram__hot-label");
-          t.classList.remove("console-diagram__dim");
+        const near = !isHot && hotEdges.length
+          ? pathNearHotEdge(path, entityMap, hotEdges)
+          : false;
+        if (isHot || near) {
+          paintEdgePath(path);
         } else {
-          t.classList.add("console-diagram__dim");
-          t.classList.remove("console-diagram__hot-label");
+          path.classList.add("console-diagram__dim");
         }
       });
 
+      forceSet.forEach((p) => paintEdgePath(p));
+
+      highlightFkColumns(entityGroups, hotEdges, targetEntities);
       if (clearBtn) clearBtn.hidden = false;
     };
 
@@ -272,16 +644,23 @@
       applyHighlight(svg, neighborsOf(entity), edgesForEntity(entity));
     };
 
-    const selectEdge = (svg, fk) => {
-      if (!fk) return;
-      const key = `edge:${fk.from}:${fk.to}:${fk.fromCol}`;
+    const selectEdge = (svg, fk, clickedPath = null) => {
+      const full = enrichFk(fk);
+      if (!full) return;
+      const key = `edge:${full.from}:${full.to}:${full.fromCol || full.label}`;
       if (activeKey === key) {
         clearHighlight(svg);
         return;
       }
       clearHighlight(svg);
       activeKey = key;
-      applyHighlight(svg, new Set([fk.from, fk.to]), [fk]);
+      applyHighlight(
+        svg,
+        new Set([full.from, full.to]),
+        [full],
+        new Set(),
+        clickedPath ? [clickedPath] : [],
+      );
     };
 
     const selectColumn = (svg, colName, entityHint) => {
@@ -305,86 +684,148 @@
       applyHighlight(svg, hotEntities, related);
     };
 
-    const addHitArea = (path, onClick) => {
-      path.style.cursor = "pointer";
-      path.style.pointerEvents = "stroke";
-      const hit = path.cloneNode(false);
-      hit.removeAttribute("marker-end");
-      hit.removeAttribute("marker-start");
-      hit.classList.add("console-diagram__hit");
-      hit.setAttribute("fill", "none");
-      hit.setAttribute("stroke", "transparent");
-      hit.setAttribute("stroke-width", "18");
-      hit.style.cursor = "pointer";
-      hit.style.pointerEvents = "stroke";
-      hit.addEventListener("click", onClick);
-      path.parentNode && path.parentNode.insertBefore(hit, path);
-      path.addEventListener("click", onClick);
-    };
-
     const wireSvg = (svg) => {
-      svg.classList.add("console-diagram__svg");
+      svg.classList.add("console-diagram__svg", "console-diagram__svg--interactive");
+      svg.style.cursor = "default";
+
+      // Style injecte DANS le SVG pour battre `#mmd-xxx .relationshipLine { stroke: lightgrey }`
+      const ns = "http://www.w3.org/2000/svg";
+      const style = document.createElementNS(ns, "style");
+      style.textContent = [
+        "path.relationshipLine.console-diagram__hot-edge{",
+        "stroke:var(--console-primary)!important;fill:none!important;opacity:1!important;",
+        "}",
+        "g.console-diagram__hot path.console-diagram__hot-border{",
+        "stroke:var(--console-primary)!important;",
+        "}",
+        "g.console-diagram__hot[data-console-target] g.outer-path > path:first-child{",
+        "fill:var(--console-primary)!important;",
+        "}",
+        ".console-diagram__hot-fk,.console-diagram__hot-fk p{",
+        "color:var(--console-primary)!important;font-weight:700!important;",
+        "}",
+      ].join("");
+      svg.insertBefore(style, svg.firstChild);
+
       const groups = findEntityGroups(svg);
       const entityMap = new Map(groups.map((g) => [g.name, g.el]));
-      const edgeGroups = findEdgeGroups(svg);
 
+      // Marquer les entites AVANT la detection des liens (exclusion fiable)
       groups.forEach(({ el, name }) => {
+        el.classList.add("console-diagram__entity");
+        el.setAttribute("data-console-entity", name);
         el.style.cursor = "pointer";
-        el.style.pointerEvents = "all";
-        el.addEventListener("click", (ev) => {
+      });
+
+      const edgePaths = findEdgePaths(svg);
+
+      // Hit-areas larges au-dessus du diagramme pour cliquer les fils
+      const hitLayer = document.createElementNS(ns, "g");
+      hitLayer.setAttribute("class", "console-diagram__hits");
+      const mount = svg.querySelector(":scope > g") || svg;
+      mount.appendChild(hitLayer);
+
+      edgePaths.forEach((path, idx) => {
+        path.classList.add("console-diagram__edge");
+        path.setAttribute("data-console-edge", String(idx));
+        path.style.cursor = "pointer";
+
+        // Hit-area dediee : PAS de class relationshipLine (sinon on colore le path invisible)
+        const hit = document.createElementNS(ns, "path");
+        const d = path.getAttribute("d");
+        if (d) hit.setAttribute("d", d);
+        hit.setAttribute("class", "console-diagram__hit");
+        hit.setAttribute("data-console-edge", String(idx));
+        hit.setAttribute("fill", "none");
+        hit.setAttribute("stroke", "rgba(0,0,0,0.001)");
+        hit.setAttribute("stroke-width", "18");
+        hit.style.pointerEvents = "stroke";
+        hit.style.cursor = "pointer";
+        hitLayer.appendChild(hit);
+      });
+
+      // Delegation unique : plus robuste que les listeners par element
+      svg.addEventListener("click", (ev) => {
+        const target = ev.target instanceof Element ? ev.target : null;
+        if (!target) return;
+
+        const edgeEl = target.closest("[data-console-edge]");
+        if (edgeEl) {
+          ev.preventDefault();
           ev.stopPropagation();
-          const target = ev.target;
-          if (target && target.tagName && target.tagName.toLowerCase() === "text") {
-            const label = textOf(target);
+          const idx = Number(edgeEl.getAttribute("data-console-edge"));
+          const path = edgePaths[idx];
+          if (!path) return;
+          let fk = matchEdgeToFk(path, entityMap);
+          if (!fk) fk = nearestEntities(path, entityMap);
+          selectEdge(svg, fk, path);
+          return;
+        }
+
+        const entEl = target.closest("[data-console-entity], g.node");
+        if (entEl) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const name =
+            entEl.getAttribute("data-console-entity") ||
+            entityNameFromId(entEl) ||
+            entityLabelFromNode(entEl);
+          if (!name) return;
+
+          // Clic sur une ligne attribut (foreignObject / p)
+          const attrName = target.closest(".attribute-name");
+          if (attrName) {
+            const label = (attrName.textContent || "").trim();
+            if (label && sanitize(label) !== name) {
+              selectColumn(svg, label, name);
+              return;
+            }
+          }
+          const textEl = target.closest("text");
+          if (textEl) {
+            const label = textOf(textEl);
             if (sanitize(label) !== name) {
-              const colGuess = label.replace(/[^A-Za-z0-9_]+/g, " ").trim().split(/\s+/).pop() || label;
-              selectColumn(svg, colGuess, name);
+              const tokens = label.replace(/[^A-Za-z0-9_]+/g, " ").trim().split(/\s+/);
+              selectColumn(svg, tokens[tokens.length - 1] || label, name);
               return;
             }
           }
           selectEntity(svg, name);
-        });
-      });
-
-      edgeGroups.forEach((eg) => {
-        const handler = (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          let fk = matchEdgeToFk(eg, entityMap);
-          if (!fk && edges.length === 1) fk = edges[0];
-          selectEdge(svg, fk);
-        };
-        addHitArea(eg.path, handler);
-        eg.group.style.cursor = "pointer";
-        eg.group.addEventListener("click", handler);
-      });
-
-      svg.addEventListener("click", (ev) => {
-        if (ev.target === svg || ev.target.classList?.contains("console-diagram__viewport")) {
-          clearHighlight(svg);
         }
       });
+
       if (clearBtn) {
-        clearBtn.addEventListener("click", (ev) => {
+        clearBtn.onclick = (ev) => {
           ev.stopPropagation();
           clearHighlight(svg);
-        });
+        };
       }
 
-      // Debug discret si aucun trait detecte
-      if (!edgeGroups.length && edges.length) {
-        console.warn(
-          "[console-diagram] Aucun path de relation detecte dans le SVG Mermaid (",
-          edges.length,
-          "FK connues).",
-        );
+      // Si filtre actif : la table cible en fond primary, voisines en bordure
+      if (lastFilterQ.trim()) {
+        const keep = resolveKeepSet(lastFilterQ);
+        if (keep && keep.size) {
+          const qq = lastFilterQ.trim().toLowerCase();
+          const matched = [...keep].filter((n) => n.toLowerCase().includes(qq));
+          const targets = new Set(matched.length ? matched : [[...keep][0]]);
+          const hotEntities = new Set();
+          const hotEdges = [];
+          targets.forEach((t) => {
+            neighborsOf(t).forEach((n) => hotEntities.add(n));
+            edgesForEntity(t).forEach((e) => hotEdges.push(e));
+          });
+          activeKey = `search:${lastFilterQ}`;
+          applyHighlight(svg, hotEntities, hotEdges, targets);
+        }
       }
     };
 
-    const text = (source.textContent || "").trim();
-    if (!text) {
-      host.innerHTML = '<p class="console-flash console-flash--error">Diagramme vide.</p>';
-    } else {
+    const renderDiagram = async (body) => {
+      const token = ++renderToken;
+      if (!body.trim()) {
+        host.innerHTML = '<p class="console-flash console-flash--error">Diagramme vide.</p>';
+        return;
+      }
       try {
         if (!window.__consoleMermaidReady) {
           mermaid.initialize({
@@ -395,31 +836,139 @@
           });
           window.__consoleMermaidReady = true;
         }
-        const id = "mmd-" + Date.now();
-        const { svg } = await mermaid.render(id, text);
+        const id = "mmd-" + Date.now() + "-" + token;
+        const { svg } = await mermaid.render(id, body);
+        if (token !== renderToken) return;
         const wrap = document.createElement("div");
         wrap.className = "console-diagram__viewport";
         const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
         const svgNode = parsed.documentElement;
         if (
-          svgNode &&
-          svgNode.nodeName.toLowerCase() === "svg" &&
-          !parsed.querySelector("parsererror")
+          !svgNode ||
+          svgNode.nodeName.toLowerCase() !== "svg" ||
+          parsed.querySelector("parsererror")
         ) {
-          const imported = document.importNode(svgNode, true);
-          wrap.appendChild(imported);
-          host.innerHTML = "";
-          host.appendChild(wrap);
-          // Attendre layout pour getBBox fiable
-          requestAnimationFrame(() => wireSvg(imported));
-        } else {
           throw new Error("SVG invalide");
         }
+        const imported = document.importNode(svgNode, true);
+        wrap.appendChild(imported);
+        host.innerHTML = "";
+        host.appendChild(wrap);
+        requestAnimationFrame(() => {
+          if (token !== renderToken) return;
+          wireSvg(imported);
+          if (window.__consoleDiagramApplyPanZoom) window.__consoleDiagramApplyPanZoom();
+        });
       } catch (err) {
+        if (token !== renderToken) return;
         host.innerHTML =
           '<p class="console-flash console-flash--error" role="alert">' +
-          "Impossible de rendre le diagramme Mermaid (syntaxe invalide).</p>";
+          "Impossible de rendre le diagramme Mermaid.</p>";
       }
-    }
+    };
+
+    const applySearchFilter = (q) => {
+      lastFilterQ = String(q || "");
+      window.__consoleTableQ = lastFilterQ.trim();
+      const keep = resolveKeepSet(lastFilterQ);
+      if (keep && !keep.size) {
+        host.innerHTML =
+          '<p class="console-empty">Aucune table correspondante pour cette recherche.</p>';
+        if (clearBtn) clearBtn.hidden = true;
+        return;
+      }
+      const body = buildMermaidBody(keep);
+      void renderDiagram(body);
+    };
+
+    const onFilter = (ev) => {
+      const q = ev.detail?.q || "";
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => applySearchFilter(q), 120);
+    };
+    const onFocus = (ev) => {
+      const name = sanitize(ev.detail?.name || "");
+      if (!name) return;
+      lastFilterQ = name;
+      window.__consoleTableQ = name;
+      void renderDiagram(buildMermaidBody(neighborsOf(name))).then(() => {
+        /* wireSvg applique deja le focus search si lastFilterQ set */
+      });
+    };
+
+    window.addEventListener("console:filter-tables", onFilter);
+    window.addEventListener("console:focus-table", onFocus);
+
+    // Pan (clic droit maintenu) + zoom (molette), persistant entre re-rendus
+    const panZoom = { scale: 1, tx: 0, ty: 0, panning: false, lastX: 0, lastY: 0 };
+
+    const applyPanZoom = () => {
+      const svg = host.querySelector("svg");
+      if (!svg) return;
+      svg.style.transformOrigin = "0 0";
+      svg.style.transform =
+        `translate(${panZoom.tx}px, ${panZoom.ty}px) scale(${panZoom.scale})`;
+    };
+    window.__consoleDiagramApplyPanZoom = applyPanZoom;
+
+    host.addEventListener(
+      "wheel",
+      (ev) => {
+        if (!host.querySelector("svg")) return;
+        ev.preventDefault();
+        const rect = host.getBoundingClientRect();
+        const px = ev.clientX - rect.left;
+        const py = ev.clientY - rect.top;
+        const factor = ev.deltaY < 0 ? 1.1 : 1 / 1.1;
+        const next = Math.min(4, Math.max(0.2, panZoom.scale * factor));
+        const real = next / panZoom.scale;
+        // Garde le point sous le curseur stable pendant le zoom
+        panZoom.tx = px - (px - panZoom.tx) * real;
+        panZoom.ty = py - (py - panZoom.ty) * real;
+        panZoom.scale = next;
+        applyPanZoom();
+      },
+      { passive: false },
+    );
+
+    host.addEventListener("contextmenu", (ev) => ev.preventDefault());
+
+    host.addEventListener("mousedown", (ev) => {
+      if (ev.button !== 2 || !host.querySelector("svg")) return;
+      ev.preventDefault();
+      panZoom.panning = true;
+      panZoom.lastX = ev.clientX;
+      panZoom.lastY = ev.clientY;
+      host.classList.add("console-diagram__canvas--panning");
+    });
+
+    const onPanMove = (ev) => {
+      if (!panZoom.panning) return;
+      panZoom.tx += ev.clientX - panZoom.lastX;
+      panZoom.ty += ev.clientY - panZoom.lastY;
+      panZoom.lastX = ev.clientX;
+      panZoom.lastY = ev.clientY;
+      applyPanZoom();
+    };
+    const onPanEnd = (ev) => {
+      if (!panZoom.panning || ev.button !== 2) return;
+      panZoom.panning = false;
+      host.classList.remove("console-diagram__canvas--panning");
+    };
+    window.addEventListener("mousemove", onPanMove);
+    window.addEventListener("mouseup", onPanEnd);
+
+    const mo = new MutationObserver(() => {
+      if (!document.body.contains(root)) {
+        window.removeEventListener("console:filter-tables", onFilter);
+        window.removeEventListener("console:focus-table", onFocus);
+        window.removeEventListener("mousemove", onPanMove);
+        window.removeEventListener("mouseup", onPanEnd);
+        mo.disconnect();
+      }
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+
+    applySearchFilter(window.__consoleTableQ || "");
   }
 </script>
