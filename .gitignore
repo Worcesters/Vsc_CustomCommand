@@ -1,0 +1,32 @@
+﻿# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.astro/
+
+# Env / secrets
+.env
+.env.local
+*.pem
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+*.swp
+
+# Backups / temp
+*.bak
+*.tmp
+*_sync_*.py
+pytest-cache-files-*/
+
+# Generated CSS maps (optional local)
+*.css.map
