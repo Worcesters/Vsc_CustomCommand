@@ -1455,15 +1455,48 @@ function Write-ConsoleTemplates {
   <link rel="stylesheet" href="{% static 'css/main.css' %}">
   <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
   <script>
-    window.consoleShowError =
-      window.consoleShowError ||
-      function (message) {
-        window.dispatchEvent(
-          new CustomEvent("console:flash-error", {
-            detail: { message: String(message) },
-          }),
-        );
+    window.consoleShowError = function (message) {
+      const msg = String(message);
+      const modal = document.getElementById("console-flash-modal");
+
+      const openModal = () => {
+        if (!modal || !window.Alpine) return false;
+        const api = window.Alpine.$data(modal);
+        if (api && typeof api.show === "function") {
+          api.show(msg);
+          return true;
+        }
+        return false;
       };
+
+      if (openModal()) return;
+
+      let attempts = 0;
+      const waitForAlpine = () => {
+        if (openModal() || attempts++ > 120) return;
+        window.requestAnimationFrame(waitForAlpine);
+      };
+
+      if (window.Alpine) {
+        waitForAlpine();
+        return;
+      }
+
+      document.addEventListener("alpine:initialized", waitForAlpine, { once: true });
+    };
+
+    window.consoleScanErrors = function (root) {
+      if (!root || typeof root.querySelectorAll !== "function") return;
+      root.querySelectorAll("[data-console-error]").forEach((el) => {
+        const errorMessage = el.getAttribute("data-console-error");
+        if (errorMessage) window.consoleShowError(errorMessage);
+        el.remove();
+      });
+    };
+
+    document.addEventListener("alpine:initialized", () => {
+      window.consoleScanErrors(document);
+    });
 
     document.addEventListener("alpine:init", () => {
       Alpine.data("consoleFlashModal", () => ({
@@ -1566,7 +1599,6 @@ function Write-ConsoleTemplates {
     x-data="consoleFlashModal()"
     x-show="open"
     x-cloak
-    @console:flash-error.window="show($event.detail.message)"
     @keydown.escape.window="open && close()"
     role="alertdialog"
     aria-modal="true"
@@ -1599,16 +1631,23 @@ function Write-ConsoleTemplates {
       <p class="console-modal__message" x-text="message"></p>
     </div>
   </div>
+  <div id="console-flash-oob" hidden aria-hidden="true"></div>
   <script>
     document.body.addEventListener("htmx:afterSwap", (event) => {
       if (window.Alpine && event.detail && event.detail.elt) {
         Alpine.initTree(event.detail.elt);
       }
+      window.consoleScanErrors(event.detail.elt);
     });
     document.body.addEventListener("htmx:oobAfterSwap", (event) => {
-      if (window.Alpine && event.detail && event.detail.target) {
-        Alpine.initTree(event.detail.target);
+      const target = event.detail && (event.detail.target || event.detail.el);
+      if (window.Alpine && target) {
+        Alpine.initTree(target);
       }
+      window.consoleScanErrors(target);
+    });
+    document.body.addEventListener("htmx:afterSettle", () => {
+      window.consoleScanErrors(document);
     });
   </script>
 </body>
@@ -1744,7 +1783,7 @@ function Write-ConsoleTemplates {
   @keydown.escape.window="open = false; settingsOpen = false"
 >
   {% if flash_error %}
-    <div hidden x-data x-init="window.consoleShowError('{{ flash_error|escapejs }}')"></div>
+    <div hidden data-console-error="{{ flash_error|escape }}"></div>
   {% endif %}
 
   <div class="console-admin__toolbar">
@@ -2208,7 +2247,7 @@ function Write-ConsoleTemplates {
 
     Write-TextFile -Path (Join-Path $partials "_query_result.html") -Content @'
 {% if error %}
-  <div hidden x-data x-init="window.consoleShowError('{{ error|escapejs }}')"></div>
+  <div hidden data-console-error="{{ error|escape }}"></div>
 {% else %}
   <p class="console-editor__hint">{{ row_count }} ligne(s) Â· {{ elapsed_ms }} ms{% if truncated %} Â· tronque{% endif %}</p>
   <div class="console-editor__scroll">
@@ -3319,7 +3358,7 @@ function Write-ConsoleTemplates {
 
     Write-TextFile -Path (Join-Path $partials "_flash.html") -Content @'
 {% if level == 'error' %}
-<div id="console-flash-oob" hx-swap-oob="true" hidden x-data x-init="window.consoleShowError('{{ message|escapejs }}')"></div>
+<div id="console-flash-oob" hx-swap-oob="true" hidden data-console-error="{{ message|escape }}"></div>
 {% else %}
 <div id="console-flash" hx-swap-oob="true">
   <p class="console-flash console-flash--success">{{ message }}</p>

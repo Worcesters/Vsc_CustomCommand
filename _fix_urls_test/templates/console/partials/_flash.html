@@ -1,5 +1,5 @@
 {% if level == 'error' %}
-<div id="console-flash-oob" hx-swap-oob="true" hidden x-data x-init="window.consoleShowError('{{ message|escapejs }}')"></div>
+<div id="console-flash-oob" hx-swap-oob="true" hidden data-console-error="{{ message|escape }}"></div>
 {% else %}
 <div id="console-flash" hx-swap-oob="true">
   <p class="console-flash console-flash--success">{{ message }}</p>

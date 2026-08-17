@@ -1,5 +1,5 @@
 {% if error %}
-  <div hidden x-data x-init="window.consoleShowError('{{ error|escapejs }}')"></div>
+  <div hidden data-console-error="{{ error|escape }}"></div>
 {% else %}
   <p class="console-editor__hint">{{ row_count }} ligne(s) Â· {{ elapsed_ms }} ms{% if truncated %} Â· tronque{% endif %}</p>
   <div class="console-editor__scroll">
