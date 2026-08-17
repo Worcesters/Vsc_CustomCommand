@@ -9,7 +9,40 @@
   <link rel="stylesheet" href="{% static 'css/main.css' %}">
   <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
   <script>
+    window.consoleShowError =
+      window.consoleShowError ||
+      function (message) {
+        window.dispatchEvent(
+          new CustomEvent("console:flash-error", {
+            detail: { message: String(message) },
+          }),
+        );
+      };
+
     document.addEventListener("alpine:init", () => {
+      Alpine.data("consoleFlashModal", () => ({
+        open: false,
+        message: "",
+        _timer: null,
+        show(message) {
+          this.message = String(message);
+          this.open = true;
+          this.resetTimer();
+        },
+        close() {
+          this.open = false;
+          this.message = "";
+          if (this._timer) {
+            clearTimeout(this._timer);
+            this._timer = null;
+          }
+        },
+        resetTimer() {
+          if (this._timer) clearTimeout(this._timer);
+          this._timer = setTimeout(() => this.close(), 10000);
+        },
+      }));
+
       Alpine.data("consoleAdminSearch", (opts = {}) => ({
         view: "data",
         q: "",
@@ -81,10 +114,54 @@
 </head>
 <body class="console" hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
   {% block body %}{% endblock %}
+  <div
+    id="console-flash-modal"
+    class="console-modal"
+    x-data="consoleFlashModal()"
+    x-show="open"
+    x-cloak
+    @console:flash-error.window="show($event.detail.message)"
+    @keydown.escape.window="open && close()"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="console-flash-modal-title"
+    :aria-hidden="(!open).toString()"
+  >
+    <div
+      class="console-modal__backdrop"
+      x-show="open"
+      x-transition.opacity.duration.200ms
+      @click="close()"
+    ></div>
+    <div
+      class="console-modal__dialog console-modal__dialog--error"
+      x-show="open"
+      x-transition.opacity.duration.200ms
+      @click.stop
+    >
+      <button
+        type="button"
+        class="console-modal__close"
+        @click="close()"
+        aria-label="Fermer"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path fill="currentColor" d="M18.3 5.71a1 1 0 0 0-1.41 0L12 10.59 7.11 5.7A1 1 0 0 0 5.7 7.11L10.59 12 5.7 16.89a1 1 0 1 0 1.41 1.41L12 13.41l4.89 4.89a1 1 0 0 0 1.41-1.41L13.41 12l4.89-4.89a1 1 0 0 0 0-1.4z"/>
+        </svg>
+      </button>
+      <h2 id="console-flash-modal-title" class="console-modal__title">Erreur</h2>
+      <p class="console-modal__message" x-text="message"></p>
+    </div>
+  </div>
   <script>
     document.body.addEventListener("htmx:afterSwap", (event) => {
       if (window.Alpine && event.detail && event.detail.elt) {
         Alpine.initTree(event.detail.elt);
+      }
+    });
+    document.body.addEventListener("htmx:oobAfterSwap", (event) => {
+      if (window.Alpine && event.detail && event.detail.target) {
+        Alpine.initTree(event.detail.target);
       }
     });
   </script>

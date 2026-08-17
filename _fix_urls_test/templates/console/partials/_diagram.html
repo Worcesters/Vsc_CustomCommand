@@ -823,7 +823,8 @@
     const renderDiagram = async (body) => {
       const token = ++renderToken;
       if (!body.trim()) {
-        host.innerHTML = '<p class="console-flash console-flash--error">Diagramme vide.</p>';
+        host.innerHTML = "";
+        window.consoleShowError("Diagramme vide.");
         return;
       }
       try {
@@ -861,9 +862,8 @@
         });
       } catch (err) {
         if (token !== renderToken) return;
-        host.innerHTML =
-          '<p class="console-flash console-flash--error" role="alert">' +
-          "Impossible de rendre le diagramme Mermaid.</p>";
+        host.innerHTML = "";
+        window.consoleShowError("Impossible de rendre le diagramme Mermaid.");
       }
     };
 

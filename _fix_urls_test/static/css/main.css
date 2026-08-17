@@ -735,6 +735,86 @@ textarea {
   border-color: color-mix(in oklch, var(--console-danger) 40%, transparent);
 }
 
+.console-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+.console-modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklch, var(--console-bg) 55%, transparent);
+}
+
+.console-modal__dialog {
+  position: relative;
+  z-index: 1;
+  width: min(100%, 28rem);
+  padding: var(--space-5);
+  border: 1px solid var(--console-border);
+  border-radius: var(--console-radius-lg);
+  background: var(--console-card);
+}
+
+.console-modal__dialog--error {
+  border-color: color-mix(in oklch, var(--console-danger) 40%, transparent);
+}
+
+.console-modal__close {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--console-radius);
+  background: transparent;
+  color: var(--console-muted);
+  cursor: pointer;
+  transition: color var(--console-transition), background var(--console-transition);
+}
+
+.console-modal__close svg {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+.console-modal__close:hover {
+  color: var(--console-fg);
+  background: color-mix(in oklch, var(--console-muted) 12%, transparent);
+}
+
+.console-modal__title {
+  margin: 0 0 var(--space-2);
+  padding-right: var(--space-6);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--console-fg);
+}
+
+.console-modal__message {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--console-fg);
+  white-space: pre-wrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .console-modal [x-transition] {
+    transition: none !important;
+  }
+}
+
 /* Welcome */
 .console-welcome {
   display: flex;
@@ -1192,6 +1272,40 @@ textarea {
   font-size: 0.8125rem;
   font-weight: 600;
   color: var(--console-fg);
+}
+
+.console-admin__ddl-panel-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.console-ddl__tabs {
+  width: 100%;
+  margin-bottom: var(--space-3);
+}
+
+.console-ddl__tabs .console__pill {
+  flex: 1 1 50%;
+  justify-content: center;
+  font-size: 0.8125rem;
+}
+
+.console-ddl__panel .console-form {
+  margin-top: 0;
+}
+
+.console-admin__ddl-panel .console-form--ddl {
+  margin-top: 0;
+}
+
+.console-admin__ddl-panel .console-form--ddl .console-form__row {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.console-admin__ddl-panel .console-form--ddl .console-form__field {
+  min-width: 0;
+  width: 100%;
 }
 
 .console-admin__ddl-panel .console-form {

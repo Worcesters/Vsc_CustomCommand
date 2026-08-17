@@ -177,6 +177,86 @@ function Get-ConsoleScss {
   border-color: color-mix(in oklch, var(--console-danger) 40%, transparent);
 }
 
+.console-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+.console-modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklch, var(--console-bg) 55%, transparent);
+}
+
+.console-modal__dialog {
+  position: relative;
+  z-index: 1;
+  width: min(100%, 28rem);
+  padding: var(--space-5);
+  border: 1px solid var(--console-border);
+  border-radius: var(--console-radius-lg);
+  background: var(--console-card);
+}
+
+.console-modal__dialog--error {
+  border-color: color-mix(in oklch, var(--console-danger) 40%, transparent);
+}
+
+.console-modal__close {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--console-radius);
+  background: transparent;
+  color: var(--console-muted);
+  cursor: pointer;
+  transition: color var(--console-transition), background var(--console-transition);
+}
+
+.console-modal__close svg {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+.console-modal__close:hover {
+  color: var(--console-fg);
+  background: color-mix(in oklch, var(--console-muted) 12%, transparent);
+}
+
+.console-modal__title {
+  margin: 0 0 var(--space-2);
+  padding-right: var(--space-6);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--console-fg);
+}
+
+.console-modal__message {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--console-fg);
+  white-space: pre-wrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .console-modal [x-transition] {
+    transition: none !important;
+  }
+}
+
 /* Welcome */
 .console-welcome {
   display: flex;
@@ -642,6 +722,40 @@ function Get-ConsoleScss {
   font-size: 0.8125rem;
   font-weight: 600;
   color: var(--console-fg);
+}
+
+.console-admin__ddl-panel-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.console-ddl__tabs {
+  width: 100%;
+  margin-bottom: var(--space-3);
+}
+
+.console-ddl__tabs .console__pill {
+  flex: 1 1 50%;
+  justify-content: center;
+  font-size: 0.8125rem;
+}
+
+.console-ddl__panel .console-form {
+  margin-top: 0;
+}
+
+.console-admin__ddl-panel .console-form--ddl {
+  margin-top: 0;
+}
+
+.console-admin__ddl-panel .console-form--ddl .console-form__row {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.console-admin__ddl-panel .console-form--ddl .console-form__field {
+  min-width: 0;
+  width: 100%;
 }
 
 .console-admin__ddl-panel .console-form {
@@ -1341,7 +1455,40 @@ function Write-ConsoleTemplates {
   <link rel="stylesheet" href="{% static 'css/main.css' %}">
   <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
   <script>
+    window.consoleShowError =
+      window.consoleShowError ||
+      function (message) {
+        window.dispatchEvent(
+          new CustomEvent("console:flash-error", {
+            detail: { message: String(message) },
+          }),
+        );
+      };
+
     document.addEventListener("alpine:init", () => {
+      Alpine.data("consoleFlashModal", () => ({
+        open: false,
+        message: "",
+        _timer: null,
+        show(message) {
+          this.message = String(message);
+          this.open = true;
+          this.resetTimer();
+        },
+        close() {
+          this.open = false;
+          this.message = "";
+          if (this._timer) {
+            clearTimeout(this._timer);
+            this._timer = null;
+          }
+        },
+        resetTimer() {
+          if (this._timer) clearTimeout(this._timer);
+          this._timer = setTimeout(() => this.close(), 10000);
+        },
+      }));
+
       Alpine.data("consoleAdminSearch", (opts = {}) => ({
         view: "data",
         q: "",
@@ -1413,10 +1560,54 @@ function Write-ConsoleTemplates {
 </head>
 <body class="console" hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
   {% block body %}{% endblock %}
+  <div
+    id="console-flash-modal"
+    class="console-modal"
+    x-data="consoleFlashModal()"
+    x-show="open"
+    x-cloak
+    @console:flash-error.window="show($event.detail.message)"
+    @keydown.escape.window="open && close()"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="console-flash-modal-title"
+    :aria-hidden="(!open).toString()"
+  >
+    <div
+      class="console-modal__backdrop"
+      x-show="open"
+      x-transition.opacity.duration.200ms
+      @click="close()"
+    ></div>
+    <div
+      class="console-modal__dialog console-modal__dialog--error"
+      x-show="open"
+      x-transition.opacity.duration.200ms
+      @click.stop
+    >
+      <button
+        type="button"
+        class="console-modal__close"
+        @click="close()"
+        aria-label="Fermer"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path fill="currentColor" d="M18.3 5.71a1 1 0 0 0-1.41 0L12 10.59 7.11 5.7A1 1 0 0 0 5.7 7.11L10.59 12 5.7 16.89a1 1 0 1 0 1.41 1.41L12 13.41l4.89 4.89a1 1 0 0 0 1.41-1.41L13.41 12l4.89-4.89a1 1 0 0 0 0-1.4z"/>
+        </svg>
+      </button>
+      <h2 id="console-flash-modal-title" class="console-modal__title">Erreur</h2>
+      <p class="console-modal__message" x-text="message"></p>
+    </div>
+  </div>
   <script>
     document.body.addEventListener("htmx:afterSwap", (event) => {
       if (window.Alpine && event.detail && event.detail.elt) {
         Alpine.initTree(event.detail.elt);
+      }
+    });
+    document.body.addEventListener("htmx:oobAfterSwap", (event) => {
+      if (window.Alpine && event.detail && event.detail.target) {
+        Alpine.initTree(event.detail.target);
       }
     });
   </script>
@@ -1553,7 +1744,7 @@ function Write-ConsoleTemplates {
   @keydown.escape.window="open = false; settingsOpen = false"
 >
   {% if flash_error %}
-    <p class="console-flash console-flash--error" role="alert">{{ flash_error }}</p>
+    <div hidden x-data x-init="window.consoleShowError('{{ flash_error|escapejs }}')"></div>
   {% endif %}
 
   <div class="console-admin__toolbar">
@@ -1713,7 +1904,7 @@ function Write-ConsoleTemplates {
     aria-label="Creer ou supprimer une table"
   >
     <div class="console-admin__ddl-panel-head">
-      <span>Creer / supprimer</span>
+      <span class="console-admin__ddl-panel-title">Structure</span>
       <button type="button" class="console-btn console-btn--ghost console-btn--sm" @click="settingsOpen = false">Fermer</button>
     </div>
     {% include "console/partials/_ddl_tables.html" %}
@@ -2017,7 +2208,7 @@ function Write-ConsoleTemplates {
 
     Write-TextFile -Path (Join-Path $partials "_query_result.html") -Content @'
 {% if error %}
-  <p class="console-flash console-flash--error">{{ error }}</p>
+  <div hidden x-data x-init="window.consoleShowError('{{ error|escapejs }}')"></div>
 {% else %}
   <p class="console-editor__hint">{{ row_count }} ligne(s) Â· {{ elapsed_ms }} ms{% if truncated %} Â· tronque{% endif %}</p>
   <div class="console-editor__scroll">
@@ -2861,7 +3052,8 @@ function Write-ConsoleTemplates {
     const renderDiagram = async (body) => {
       const token = ++renderToken;
       if (!body.trim()) {
-        host.innerHTML = '<p class="console-flash console-flash--error">Diagramme vide.</p>';
+        host.innerHTML = "";
+        window.consoleShowError("Diagramme vide.");
         return;
       }
       try {
@@ -2899,9 +3091,8 @@ function Write-ConsoleTemplates {
         });
       } catch (err) {
         if (token !== renderToken) return;
-        host.innerHTML =
-          '<p class="console-flash console-flash--error" role="alert">' +
-          "Impossible de rendre le diagramme Mermaid.</p>";
+        host.innerHTML = "";
+        window.consoleShowError("Impossible de rendre le diagramme Mermaid.");
       }
     };
 
@@ -3013,85 +3204,127 @@ function Write-ConsoleTemplates {
 '@
 
     Write-TextFile -Path (Join-Path $partials "_ddl_tables.html") -Content @'
-<form
-  class="console-form"
-  method="post"
-  hx-post="{% url 'admin_panel:console_table_create' %}"
-  hx-target="#console-main"
-  hx-swap="innerHTML"
-  novalidate
-  x-data="{ tried: false }"
-  @submit="tried = true; if (!$el.checkValidity()) { $event.preventDefault(); $event.stopPropagation(); }"
->
-  {% csrf_token %}
-  <div class="console-form__row">
-    <label class="console-form__field">
-      <span class="console-form__label">Nom de table <abbr class="console-form__req" title="Obligatoire">*</abbr></span>
-      <input class="console-form__input" type="text" name="name" required pattern="[A-Za-z_][A-Za-z0-9_]*" aria-required="true" :class="tried && $el.validity && !$el.validity.valid && 'console-form__input--invalid'">
-    </label>
-    <label class="console-form__field">
-      <span class="console-form__label">Colonne PK <abbr class="console-form__req" title="Obligatoire">*</abbr></span>
-      <input class="console-form__input" type="text" name="pk_name" value="id" required aria-required="true" :class="tried && $el.validity && !$el.validity.valid && 'console-form__input--invalid'">
-    </label>
-    <label class="console-form__field">
-      <span class="console-form__label">Type PK</span>
-      <select class="console-form__select" name="pk_type">
-        <option value="serial">serial</option>
-        <option value="bigserial">bigserial</option>
-        <option value="uuid">uuid</option>
-      </select>
-    </label>
-    <label class="console-form__field">
-      <span class="console-form__label">Colonne 2</span>
-      <input class="console-form__input" type="text" name="col2_name" value="name">
-    </label>
-    <label class="console-form__field">
-      <span class="console-form__label">Type col 2</span>
-      <select class="console-form__select" name="col2_type">
-        <option value="text">text</option>
-        <option value="varchar(255)">varchar(255)</option>
-        <option value="integer">integer</option>
-      </select>
-    </label>
-    <button type="submit" class="console-btn console-btn--primary console-btn--sm">Creer table</button>
+<div class="console-ddl" x-data="{ ddlTab: 'create' }">
+  <div class="console__pills console-ddl__tabs" role="tablist" aria-label="Creer ou supprimer une table">
+    <button
+      type="button"
+      class="console__pill"
+      role="tab"
+      :class="ddlTab === 'create' && 'console__pill--active'"
+      :aria-selected="(ddlTab === 'create').toString()"
+      aria-controls="console-ddl-create"
+      @click="ddlTab = 'create'"
+    >Creation</button>
+    <button
+      type="button"
+      class="console__pill"
+      role="tab"
+      :class="ddlTab === 'drop' && 'console__pill--active'"
+      :aria-selected="(ddlTab === 'drop').toString()"
+      aria-controls="console-ddl-drop"
+      @click="ddlTab = 'drop'"
+    >Suppression</button>
   </div>
-</form>
 
-<form
-  class="console-form"
-  method="post"
-  hx-post="{% url 'admin_panel:console_table_drop' %}"
-  hx-target="#console-main"
-  hx-swap="innerHTML"
-  hx-confirm="Supprimer definitivement cette table ? Action irreversible."
-  novalidate
-  x-data="{ tried: false }"
-  @submit="tried = true; if (!$el.checkValidity()) { $event.preventDefault(); $event.stopPropagation(); }"
->
-  {% csrf_token %}
-  <div class="console-form__row">
-    <label class="console-form__field">
-      <span class="console-form__label">Table a supprimer <abbr class="console-form__req" title="Obligatoire">*</abbr></span>
-      <input class="console-form__input" type="text" name="name" required pattern="[A-Za-z_][A-Za-z0-9_]*" list="console-table-names" autocomplete="off" aria-required="true" :class="tried && $el.validity && !$el.validity.valid && 'console-form__input--invalid'">
-      <datalist id="console-table-names">
-        {% for t in tables %}
-          <option value="{{ t.name }}"></option>
-        {% endfor %}
-      </datalist>
-    </label>
-    <label class="console-form__field">
-      <span class="console-form__label">Confirmer le nom <abbr class="console-form__req" title="Obligatoire">*</abbr></span>
-      <input class="console-form__input" type="text" name="confirm_name" required pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="Ressaisir le nom" autocomplete="off" aria-required="true" :class="tried && $el.validity && !$el.validity.valid && 'console-form__input--invalid'">
-    </label>
-    <button type="submit" class="console-btn console-btn--danger console-btn--sm">Drop table</button>
+  <div
+    id="console-ddl-create"
+    class="console-ddl__panel"
+    role="tabpanel"
+    x-show="ddlTab === 'create'"
+  >
+    <form
+      class="console-form console-form--ddl"
+      method="post"
+      hx-post="{% url 'admin_panel:console_table_create' %}"
+      hx-target="#console-main"
+      hx-swap="innerHTML"
+      novalidate
+      x-data="{ tried: false }"
+      @submit="tried = true; if (!$el.checkValidity()) { $event.preventDefault(); $event.stopPropagation(); }"
+    >
+      {% csrf_token %}
+      <div class="console-form__row">
+        <label class="console-form__field">
+          <span class="console-form__label">Nom de table <abbr class="console-form__req" title="Obligatoire">*</abbr></span>
+          <input class="console-form__input" type="text" name="name" required pattern="[A-Za-z_][A-Za-z0-9_]*" aria-required="true" :class="tried && $el.validity && !$el.validity.valid && 'console-form__input--invalid'">
+        </label>
+        <label class="console-form__field">
+          <span class="console-form__label">Colonne PK <abbr class="console-form__req" title="Obligatoire">*</abbr></span>
+          <input class="console-form__input" type="text" name="pk_name" value="id" required aria-required="true" :class="tried && $el.validity && !$el.validity.valid && 'console-form__input--invalid'">
+        </label>
+        <label class="console-form__field">
+          <span class="console-form__label">Type PK</span>
+          <select class="console-form__select" name="pk_type">
+            <option value="serial">serial</option>
+            <option value="bigserial">bigserial</option>
+            <option value="uuid">uuid</option>
+          </select>
+        </label>
+        <label class="console-form__field">
+          <span class="console-form__label">Colonne 2</span>
+          <input class="console-form__input" type="text" name="col2_name" value="name">
+        </label>
+        <label class="console-form__field">
+          <span class="console-form__label">Type col 2</span>
+          <select class="console-form__select" name="col2_type">
+            <option value="text">text</option>
+            <option value="varchar(255)">varchar(255)</option>
+            <option value="integer">integer</option>
+          </select>
+        </label>
+        <button type="submit" class="console-btn console-btn--primary console-btn--sm">Creer table</button>
+      </div>
+    </form>
   </div>
-</form>
+
+  <div
+    id="console-ddl-drop"
+    class="console-ddl__panel"
+    role="tabpanel"
+    x-show="ddlTab === 'drop'"
+    x-cloak
+  >
+    <form
+      class="console-form console-form--ddl"
+      method="post"
+      hx-post="{% url 'admin_panel:console_table_drop' %}"
+      hx-target="#console-main"
+      hx-swap="innerHTML"
+      hx-confirm="Supprimer definitivement cette table ? Action irreversible."
+      novalidate
+      x-data="{ tried: false }"
+      @submit="tried = true; if (!$el.checkValidity()) { $event.preventDefault(); $event.stopPropagation(); }"
+    >
+      {% csrf_token %}
+      <div class="console-form__row">
+        <label class="console-form__field">
+          <span class="console-form__label">Table a supprimer <abbr class="console-form__req" title="Obligatoire">*</abbr></span>
+          <input class="console-form__input" type="text" name="name" required pattern="[A-Za-z_][A-Za-z0-9_]*" list="console-table-names" autocomplete="off" aria-required="true" :class="tried && $el.validity && !$el.validity.valid && 'console-form__input--invalid'">
+          <datalist id="console-table-names">
+            {% for t in tables %}
+              <option value="{{ t.name }}"></option>
+            {% endfor %}
+          </datalist>
+        </label>
+        <label class="console-form__field">
+          <span class="console-form__label">Confirmer le nom <abbr class="console-form__req" title="Obligatoire">*</abbr></span>
+          <input class="console-form__input" type="text" name="confirm_name" required pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="Ressaisir le nom" autocomplete="off" aria-required="true" :class="tried && $el.validity && !$el.validity.valid && 'console-form__input--invalid'">
+        </label>
+        <button type="submit" class="console-btn console-btn--danger console-btn--sm">Drop table</button>
+      </div>
+    </form>
+  </div>
+</div>
 '@
 
     Write-TextFile -Path (Join-Path $partials "_flash.html") -Content @'
+{% if level == 'error' %}
+<div id="console-flash-oob" hx-swap-oob="true" hidden x-data x-init="window.consoleShowError('{{ message|escapejs }}')"></div>
+{% else %}
 <div id="console-flash" hx-swap-oob="true">
-  <p class="console-flash console-flash--{{ level|default:'success' }}">{{ message }}</p>
+  <p class="console-flash console-flash--success">{{ message }}</p>
 </div>
+{% endif %}
 '@
 
     Write-TextFile -Path (Join-Path $regDir "login.html") -Content @'

@@ -7,7 +7,7 @@
   @keydown.escape.window="open = false; settingsOpen = false"
 >
   {% if flash_error %}
-    <p class="console-flash console-flash--error" role="alert">{{ flash_error }}</p>
+    <div hidden x-data x-init="window.consoleShowError('{{ flash_error|escapejs }}')"></div>
   {% endif %}
 
   <div class="console-admin__toolbar">
