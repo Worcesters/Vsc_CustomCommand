@@ -366,29 +366,34 @@ function New-RootGitignore {
     .SYNOPSIS
       .gitignore racine (venv, node_modules, .env, staticfiles, Astro dist).
     #>
-    param([Parameter(Mandatory)][string]$Root)
-    Write-TextFile -Path (Join-Path $Root ".gitignore") -Content @'
+    param([Parameter(Mandatory)][string]$Root,
+        [string]$BackendDirName = "backend",
+        [string]$FrontendDirName = "frontend")
+    Write-TextFile -Path (Join-Path $Root ".gitignore") -Content @"
 .venv/
+$BackendDirName/.venv/
 __pycache__/
 *.py[cod]
 *.sqlite3
 db.sqlite3
 staticfiles/
+$BackendDirName/staticfiles/
 .env
 .env.local
 .migrate_bootstrap.py
+$BackendDirName/.migrate_bootstrap.py
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .idea/
 .vscode/
-frontend/node_modules/
-frontend/dist/
-frontend/.astro/
-frontend/.env
-frontend/.env.local
-'@
+$FrontendDirName/node_modules/
+$FrontendDirName/dist/
+$FrontendDirName/.astro/
+$FrontendDirName/.env
+$FrontendDirName/.env.local
+"@
 }
 
 function New-ProjectReadme {
@@ -401,7 +406,9 @@ function New-ProjectReadme {
         [Parameter(Mandatory)][string]$AppName,
         [bool]$HasCustomAdmin = $true,
         [bool]$HasFrontend = $true,
-        [bool]$HasDocker = $false
+        [bool]$HasDocker = $false,
+        [string]$BackendDirName = "backend",
+        [string]$FrontendDirName = "frontend"
     )
 
     $scaffoldDir = $PSScriptRoot
@@ -413,6 +420,8 @@ function New-ProjectReadme {
         $readme = Get-Content -LiteralPath $fullstackTemplate -Raw -Encoding UTF8
         $readme = $readme.Replace("__PROJECT_TITLE__", $projectTitle)
         $readme = $readme.Replace("__APP_NAME__", $AppName)
+        $readme = $readme.Replace("__BACKEND_DIR__", $BackendDirName)
+        $readme = $readme.Replace("__FRONTEND_DIR__", $FrontendDirName)
         Write-TextFile -Path (Join-Path $Root "README.md") -Content $readme
         return
     }
@@ -473,24 +482,38 @@ uv run python manage.py runserver
         if ($HasFrontend) {
             @"
 
-## Docker (dev - db + redis + web + frontend + worker + beat)
+## Docker (trois compose)
+
 ``````bash
+# Global (racine) : db + redis + web + frontend + worker + beat
 docker compose up --build
+
+# Backend seul (uv sync --frozen a chaque up)
+cd $BackendDirName && docker compose up --build
+
+# Frontend seul (Astro :4321, API sur localhost:8000)
+cd $FrontendDirName && docker compose up --build
 ``````
 
 - API : http://localhost:8000
 - Astro : http://localhost:4321
 - Back-office HTMX : http://localhost:8000/backoffice/
 
+Ne pas lancer le compose racine ET un compose de sous-dossier en parallele (ports).
+
 Production : ``docker compose -f docker-compose.prod.yml up --build``
 "@
         } else {
             @"
 
-## Docker (dev - db + redis + web + worker + beat)
+## Docker (compose global + compose backend)
+
 ``````bash
 docker compose up --build
+# ou : cd $BackendDirName && docker compose up --build
 ``````
+
+Chaque ``up`` backend execute ``uv sync --frozen``.
 
 - API : http://localhost:8000
 - Back-office HTMX : http://localhost:8000/backoffice/
@@ -528,9 +551,9 @@ Production : ``docker compose -f docker-compose.prod.yml up --build``
     }
 
     $dockerUpHint = if ($HasFrontend) {
-        "docker compose up          # web + frontend Astro + worker/beat"
+        "docker compose up          # global : web + frontend Astro + worker/beat"
     } else {
-        "docker compose up          # web + worker/beat"
+        "docker compose up          # global : web + worker/beat"
     }
 
     $backendAdminLine = if ($HasCustomAdmin) {
@@ -594,69 +617,78 @@ function Test-ProjectStructure {
         [Parameter(Mandatory)][string]$AppName,
         [bool]$ExpectCustomAdmin = $true,
         [bool]$ExpectFrontend = $true,
-        [bool]$ExpectDocker = $false
+        [bool]$ExpectDocker = $false,
+        [string]$BackendDirName = "backend",
+        [string]$FrontendDirName = "frontend"
     )
+    $b = $BackendDirName
+    $f = $FrontendDirName
     $required = @(
-        "manage.py",
-        "config\settings\base.py",
-        "config\settings\dev.py",
-        "config\urls.py",
-        "config\api.py",
-        "apps\$AppName\models.py",
-        "apps\$AppName\services.py",
-        "apps\$AppName\selectors.py",
-        "apps\$AppName\schemas.py",
-        "templates\base.html",
-        "static\scss\main.scss",
+        "$b\manage.py",
+        "$b\config\settings\base.py",
+        "$b\config\settings\dev.py",
+        "$b\config\urls.py",
+        "$b\config\api.py",
+        "$b\apps\$AppName\models.py",
+        "$b\apps\$AppName\services.py",
+        "$b\apps\$AppName\selectors.py",
+        "$b\apps\$AppName\schemas.py",
+        "$b\templates\base.html",
+        "$b\static\scss\main.scss",
         ".cursor\AGENTS.md",
         ".cursor\rules\00-project-stack.mdc"
     )
     if ($ExpectCustomAdmin) {
         $required += @(
-            "apps\admin_panel\registry.py",
-            "apps\admin_panel\api.py",
-            "apps\admin_panel\schemas.py",
-            "apps\admin_panel\urls.py",
-            "apps\admin_panel\views.py",
-            "templates\console\shell.html",
-            "templates\registration\login.html"
+            "$b\apps\admin_panel\registry.py",
+            "$b\apps\admin_panel\api.py",
+            "$b\apps\admin_panel\schemas.py",
+            "$b\apps\admin_panel\urls.py",
+            "$b\apps\admin_panel\views.py",
+            "$b\templates\console\shell.html",
+            "$b\templates\registration\login.html"
         )
     } else {
-        $required += "apps\$AppName\admin.py"
+        $required += "$b\apps\$AppName\admin.py"
     }
     if ($ExpectFrontend) {
-        $lockFile = Join-Path $Root "frontend\pnpm-lock.yaml"
+        $lockFile = Join-Path $Root "$f\pnpm-lock.yaml"
         if ($ExpectDocker -and -not (Test-Path -LiteralPath $lockFile)) {
-            Write-Host "     Avertissement : frontend/pnpm-lock.yaml absent (Docker : cd frontend && pnpm install)." -ForegroundColor DarkYellow
+            Write-Host "     Avertissement : $f/pnpm-lock.yaml absent (Docker : cd $f && pnpm install)." -ForegroundColor DarkYellow
         }
         $required += @(
-            "frontend\package.json",
-            "frontend\astro.config.mjs",
-            "frontend\src\pages\index.astro"
+            "$f\package.json",
+            "$f\astro.config.mjs",
+            "$f\src\pages\index.astro"
         )
         if ($ExpectCustomAdmin) {
             $required += @(
-                "frontend\src\pages\admin.astro",
-                "frontend\src\pages\login.astro",
-                "frontend\src\lib\api\client.ts"
+                "$f\src\pages\admin.astro",
+                "$f\src\pages\login.astro",
+                "$f\src\lib\api\client.ts"
             )
         }
     }
     if ($ExpectDocker) {
         $required += @(
-            "Dockerfile",
+            "$b\Dockerfile",
             "docker-compose.yml",
             "docker-compose.prod.yml",
-            "scripts\docker-web-dev.sh",
-            "scripts\docker-web-prod.sh",
-            "config\celery.py",
-            "apps\$AppName\tasks.py",
-            "apps\$AppName\api.py"
+            "$b\docker-compose.yml",
+            "$b\docker-compose.prod.yml",
+            "$b\scripts\docker-web-dev.sh",
+            "$b\scripts\docker-web-prod.sh",
+            "$b\scripts\docker-uv-sync.sh",
+            "$b\config\celery.py",
+            "$b\apps\$AppName\tasks.py",
+            "$b\apps\$AppName\api.py"
         )
         if ($ExpectFrontend) {
             $required += @(
-                "frontend\Dockerfile",
-                "frontend\scripts\docker-entrypoint-dev.sh"
+                "$f\Dockerfile",
+                "$f\docker-compose.yml",
+                "$f\docker-compose.prod.yml",
+                "$f\scripts\docker-entrypoint-dev.sh"
             )
         }
     }

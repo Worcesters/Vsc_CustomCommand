@@ -1,0 +1,1 @@
+"""Django admin natif non utilise pour les models registry (UI HTMX / API Ninja)."""

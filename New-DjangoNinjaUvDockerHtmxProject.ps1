@@ -5,11 +5,13 @@
 
 .DESCRIPTION
   Orchestrateur mince : dot-source des modules scaffold/, puis pipeline.
-  Stack : Django a la racine, HTMX (UI interne) toujours, Astro (UI produit) optionnel,
-  admin_panel optionnel, Docker Compose (db, redis, web, frontend, worker, beat).
+  Stack : Django dans un dossier backend nomme, HTMX (UI interne) toujours,
+  Astro (UI produit) optionnel dans un dossier frontend frere, admin_panel optionnel,
+  Docker Compose a la racine du monorepo (db, redis, web, frontend, worker, beat).
 
 .PARAMETER ProjectName
-  Nom du nouveau dossier (si -NewFolder).
+  Nom du dossier parent du monorepo (si -NewFolder). Django et Astro
+  sont ensuite crees dans des sous-dossiers nommes (backend / frontend).
 
 .PARAMETER AppName
   Slug de l'app metier sous apps/ (defaut : core).
@@ -30,7 +32,13 @@
   Force l'admin custom admin_panel + API /api/admin/.
 
 .PARAMETER SkipFrontend
-  Ignore la generation Astro (frontend/).
+  Ignore la generation Astro (pas de dossier frontend).
+
+.PARAMETER BackendDirName
+  Nom du dossier Django (defaut interactif : backend).
+
+.PARAMETER FrontendDirName
+  Nom du dossier Astro (defaut interactif : frontend).
 
 .PARAMETER UseAstro
   Force la generation Astro (desactive la question interactive).
@@ -80,6 +88,8 @@ param(
     [switch]$SkipCustomAdmin,
     [switch]$UseCustomAdmin,
     [switch]$SkipFrontend,
+    [string]$BackendDirName = "",
+    [string]$FrontendDirName = "",
     [switch]$UseAstro,
     [switch]$UseNextJs,
     [switch]$SkipDocker,
@@ -120,6 +130,7 @@ $scaffoldModules = @(
     "HtmxConsole.ps1",
     "HtmxUi.ps1",
     "AstroFrontend.ps1",
+    "DockerCompose.ps1",
     "Docker.ps1",
     "Quality.ps1",
     "CursorRules.ps1"
@@ -160,7 +171,10 @@ try {
     }
 
     if (-not $NoInteractive.IsPresent -and -not $useCurrent -and -not $wantsNewFolder) {
-        $wantsNewFolder = Read-YesNoPrompt -Prompt "Nouveau dossier projet ?" -DefaultYes:$false
+        Write-Host "  Django et Astro seront des dossiers freres (ex. backend/ et frontend/)." -ForegroundColor DarkGray
+        $wantsNewFolder = Read-YesNoPrompt `
+            -Prompt "Creer un dossier parent pour le monorepo (backend + frontend a l'interieur) ?" `
+            -DefaultYes:$false
         if ($wantsNewFolder) {
             $wantsNewFolder = $true
             $useCurrent = $false
@@ -187,16 +201,14 @@ try {
         if (-not (Test-Path -LiteralPath $root -PathType Container)) {
             throw "Repertoire introuvable : $root"
         }
-        if (Test-Path -LiteralPath (Join-Path $root "manage.py")) {
-            throw "Projet Django deja present (manage.py)."
-        }
-        Write-Host "  Cible : dossier courant" -ForegroundColor Green
+        Write-Host "  Cible monorepo : dossier courant" -ForegroundColor Green
         Write-Host "  $root" -ForegroundColor Green
+        Write-Host "  Django et Astro seront dans des sous-dossiers nommes ensuite." -ForegroundColor DarkGray
     } else {
         $projectFolder = $ProjectName.Trim()
         if ([string]::IsNullOrWhiteSpace($projectFolder)) {
             do {
-                $projectFolder = (Read-Host "Nom du nouveau dossier").Trim()
+                $projectFolder = (Read-Host "Nom du dossier parent (monorepo)").Trim()
                 if (-not (Test-ValidProjectFolderName -Name $projectFolder)) {
                     Write-Host "  Nom invalide : utilisez un nom de dossier (pas une URL web)." -ForegroundColor DarkYellow
                     $projectFolder = ""
@@ -227,8 +239,9 @@ try {
         } elseif (Test-DirectoryIsEmpty -Path $root) {
             $createdNewFolder = $true
         }
-        Write-Host "  Nouveau dossier : $projectFolder" -ForegroundColor Green
+        Write-Host "  Dossier parent : $projectFolder" -ForegroundColor Green
         Write-Host "  $root" -ForegroundColor Green
+        Write-Host "  Django et Astro seront dans des sous-dossiers nommes ensuite." -ForegroundColor DarkGray
     }
 
     # uv exige un nom de package qui commence et finit par lettre/chiffre.
@@ -247,15 +260,59 @@ try {
         $wantsAstro = $true
     } elseif (-not $NoInteractive.IsPresent) {
         $wantsAstro = Read-YesNoPrompt `
-            -Prompt "Utiliser Astro pour l'UI produit + DataStudio ?" `
+            -Prompt "Creer un frontend Astro separe (dossier frere de Django) ?" `
             -DefaultYes:$true
         if ($wantsAstro) {
-            Write-Host "  Frontend retenu : Astro UI produit + DataStudio (/admin, /login) :4321" -ForegroundColor Cyan
+            Write-Host "  Frontend retenu : Astro UI produit (:4321)" -ForegroundColor Cyan
         } else {
-            Write-Host "  Frontend retenu : pas de frontend/ (HTMX interne uniquement)" -ForegroundColor Cyan
+            Write-Host "  Frontend retenu : aucun (HTMX interne Django uniquement)" -ForegroundColor Cyan
         }
     } else {
         $wantsAstro = $true
+    }
+
+    if (-not $NoInteractive.IsPresent) {
+        if ([string]::IsNullOrWhiteSpace($BackendDirName)) {
+            $backendDirName = Read-FolderNamePrompt -Prompt "Nom du dossier backend" -Default "backend"
+        } else {
+            $backendDirName = $BackendDirName.Trim()
+        }
+        if ($wantsAstro) {
+            if ([string]::IsNullOrWhiteSpace($FrontendDirName)) {
+                $frontendDirName = Read-FolderNamePrompt -Prompt "Nom du dossier frontend" -Default "frontend"
+            } else {
+                $frontendDirName = $FrontendDirName.Trim()
+            }
+        } else {
+            $frontendDirName = "frontend"
+        }
+    } else {
+        $backendDirName = if ([string]::IsNullOrWhiteSpace($BackendDirName)) { "backend" } else { $BackendDirName.Trim() }
+        $frontendDirName = if ([string]::IsNullOrWhiteSpace($FrontendDirName)) { "frontend" } else { $FrontendDirName.Trim() }
+    }
+    if (-not (Test-ValidProjectFolderName -Name $backendDirName)) {
+        throw "Nom de dossier backend invalide : '$backendDirName'"
+    }
+    if ($wantsAstro) {
+        if (-not (Test-ValidProjectFolderName -Name $frontendDirName)) {
+            throw "Nom de dossier frontend invalide : '$frontendDirName'"
+        }
+        if ($backendDirName -eq $frontendDirName) {
+            throw "Les dossiers backend et frontend doivent avoir des noms differents."
+        }
+    }
+
+    $backend = Join-Path $root $backendDirName
+    if (Test-Path -LiteralPath (Join-Path $backend "manage.py")) {
+        throw "Projet Django deja present dans $backend (manage.py)."
+    }
+    if (Test-Path -LiteralPath (Join-Path $root "manage.py")) {
+        throw "Projet Django deja present a la racine (manage.py). Utilisez un dossier vide."
+    }
+    New-Item -ItemType Directory -Path $backend -Force | Out-Null
+    Write-Host "  Backend Django : $backend" -ForegroundColor Green
+    if ($wantsAstro) {
+        Write-Host "  Frontend Astro : $(Join-Path $root $frontendDirName)" -ForegroundColor Green
     }
 
     $wantsCustomAdmin = $true
@@ -294,64 +351,64 @@ try {
     if ($doDocker) { $script:PipelineTotal += 2 }
     if (-not $SkipCreatesuperuser.IsPresent) { $script:PipelineTotal++ }
 
-    Write-PipelineBanner -Subtitle "App: $AppName | Astro: $doFrontend | Admin: $doCustomAdmin | Docker: $doDocker"
+    Write-PipelineBanner -Subtitle "App: $AppName | Astro: $doFrontend | Admin: $doCustomAdmin | Docker: $doDocker | $backendDirName/$frontendDirName"
 
     Start-PipelineStep -Title "Environnement uv" -Detail "init + dependances runtime et dev"
-    Initialize-UvProject -Root $root -UvName $uvName -HasCustomAdmin:$doCustomAdmin -HasDocker:$doDocker
-    Complete-PipelineStep -Message "pyproject.toml + uv.lock"
+    Initialize-UvProject -Root $backend -UvName $uvName -HasCustomAdmin:$doCustomAdmin -HasDocker:$doDocker
+    Complete-PipelineStep -Message "$backendDirName/pyproject.toml + uv.lock"
 
-    Start-PipelineStep -Title "Configuration Django" -Detail "config/ + settings dev|qua|prod"
-    New-DjangoConfigPackage -Root $root -AppName $AppName `
+    Start-PipelineStep -Title "Configuration Django" -Detail "$backendDirName/config/ + settings dev|qua|prod"
+    New-DjangoConfigPackage -Root $backend -AppName $AppName `
         -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend -HasDocker:$doDocker
     Complete-PipelineStep
 
-    Start-PipelineStep -Title "Application metier" -Detail "apps/$AppName + Service Layer"
-    New-Item -ItemType Directory -Path (Join-Path $root "apps") -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $root "apps\$AppName") -Force | Out-Null
-    Write-TextFile -Path (Join-Path $root "apps\__init__.py") -Content @'
+    Start-PipelineStep -Title "Application metier" -Detail "$backendDirName/apps/$AppName + Service Layer"
+    New-Item -ItemType Directory -Path (Join-Path $backend "apps") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $backend "apps\$AppName") -Force | Out-Null
+    Write-TextFile -Path (Join-Path $backend "apps\__init__.py") -Content @'
 """Applications metier du projet."""
 '@
     Invoke-UvCommand -Arguments @(
         "run", "django-admin", "startapp", $AppName, "apps\$AppName"
-    ) -WorkingDirectory $root -Quiet
-    $appsPyPath = Join-Path $root "apps\$AppName\apps.py"
+    ) -WorkingDirectory $backend -Quiet
+    $appsPyPath = Join-Path $backend "apps\$AppName\apps.py"
     if (Test-Path -LiteralPath $appsPyPath) {
         $appsPy = Get-Content -LiteralPath $appsPyPath -Raw -Encoding UTF8
         $appsPy = $appsPy.Replace("name = `"$AppName`"", "name = `"apps.$AppName`"")
         $appsPy = $appsPy.Replace("name = '$AppName'", "name = `"apps.$AppName`"")
         Write-TextFile -Path $appsPyPath -Content $appsPy
     }
-    New-AppServiceLayer -Root $root -AppName $AppName `
+    New-AppServiceLayer -Root $backend -AppName $AppName `
         -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend
     if ($doDocker) {
-        New-CoreCeleryFiles -Root $root -AppName $AppName
+        New-CoreCeleryFiles -Root $backend -AppName $AppName
     }
-    New-CoreModels -Root $root -AppName $AppName -HasCustomAdmin:$doCustomAdmin
+    New-CoreModels -Root $backend -AppName $AppName -HasCustomAdmin:$doCustomAdmin
     if (-not $doCustomAdmin) {
-        New-DjangoNativeAdmin -Root $root -AppName $AppName
+        New-DjangoNativeAdmin -Root $backend -AppName $AppName
     }
     Complete-PipelineStep
 
     Start-PipelineStep -Title "UI HTMX interne" -Detail "templates + SCSS 7-1 + CBV back-office"
-    New-HtmxUiScaffold -Root $root -AppName $AppName `
+    New-HtmxUiScaffold -Root $backend -AppName $AppName `
         -HasFrontend:$doFrontend -HasCustomAdmin:$doCustomAdmin
     Complete-PipelineStep
 
     if ($doCustomAdmin) {
         Start-PipelineStep -Title "Admin panel API" -Detail "apps/admin_panel + registry + schema Django Ninja"
-        New-Item -ItemType Directory -Path (Join-Path $root "apps\admin_panel") -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $backend "apps\admin_panel") -Force | Out-Null
         Invoke-UvCommand -Arguments @(
             "run", "django-admin", "startapp", "admin_panel", "apps\admin_panel"
-        ) -WorkingDirectory $root -Quiet
-        $panelAppsPy = Join-Path $root "apps\admin_panel\apps.py"
+        ) -WorkingDirectory $backend -Quiet
+        $panelAppsPy = Join-Path $backend "apps\admin_panel\apps.py"
         if (Test-Path -LiteralPath $panelAppsPy) {
             $panelApps = Get-Content -LiteralPath $panelAppsPy -Raw -Encoding UTF8
             $panelApps = $panelApps.Replace('name = "admin_panel"', 'name = "apps.admin_panel"')
             $panelApps = $panelApps.Replace("name = 'admin_panel'", 'name = "apps.admin_panel"')
             Write-TextFile -Path $panelAppsPy -Content $panelApps
         }
-        New-AdminPanelBackend -Root $root -AppName $AppName
-        New-HtmxConsoleScaffold -Root $root -HasCustomAdmin:$true
+        New-AdminPanelBackend -Root $backend -AppName $AppName
+        New-HtmxConsoleScaffold -Root $backend -HasCustomAdmin:$true
         Complete-PipelineStep
     } else {
         Write-Host "     (admin custom desactive - django.contrib.admin)" -ForegroundColor DarkYellow
@@ -360,13 +417,14 @@ try {
     if ($doFrontend) {
         Start-PipelineStep -Title "Frontend Astro" -Detail "UI produit :4321 (zero React, Console HTMX :8000/console/)"
         New-AstroFrontend -Root $root -ProjectSlug $uvName -AppName $AppName `
-            -HasCustomAdmin:$doCustomAdmin
-        New-DevLocalScript -Root $root -HasDocker:$doDocker -HasCustomAdmin:$doCustomAdmin
+            -HasCustomAdmin:$doCustomAdmin -FrontendDirName $frontendDirName
+        New-DevLocalScript -Root $root -HasDocker:$doDocker -HasCustomAdmin:$doCustomAdmin `
+            -BackendDirName $backendDirName -FrontendDirName $frontendDirName
         $pkgMgr = $null
         if (-not $SkipFrontendDeps.IsPresent) {
             try {
                 $pkgMgr = Install-FrontendDependencies `
-                    -FrontendRoot (Join-Path $root "frontend") `
+                    -FrontendRoot (Join-Path $root $frontendDirName) `
                     -TimeoutSeconds $CommandTimeoutSeconds
             } catch {
                 Write-Host "     deps frontend ignore : $($_.Exception.Message)" -ForegroundColor DarkYellow
@@ -385,7 +443,8 @@ try {
         Start-PipelineStep -Title "Docker" -Detail "Dockerfile uv + compose (db/redis/web/frontend/worker/beat)"
         $postgresHostPort = Find-AvailablePostgresHostPort
         Write-Host "     Port PostgreSQL hote : $postgresHostPort" -ForegroundColor DarkGray
-        New-DockerStack -Root $root -PostgresHostPort $postgresHostPort -HasFrontend:$doFrontend
+        New-DockerStack -Root $root -PostgresHostPort $postgresHostPort -HasFrontend:$doFrontend `
+            -BackendDirName $backendDirName -FrontendDirName $frontendDirName
         Complete-PipelineStep
 
         Start-PipelineStep -Title "PostgreSQL (.env)" -Detail "base Django unique hote + Docker"
@@ -405,14 +464,16 @@ try {
 
     Start-PipelineStep -Title "Regles Cursor et skills" -Detail "AGENTS.md, STACK.md, rule MDC"
     New-CursorProjectRules -Root $root -AppName $AppName `
-        -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend
+        -HasCustomAdmin:$doCustomAdmin -HasFrontend:$doFrontend `
+        -BackendDirName $backendDirName -FrontendDirName $frontendDirName
     Complete-PipelineStep
 
     Start-PipelineStep -Title "Qualite et documentation" -Detail "pytest, ruff, README, .gitignore"
-    New-QualityTooling -Root $root -HasCustomAdmin:$doCustomAdmin
-    New-RootGitignore -Root $root
+    New-QualityTooling -Root $backend -HasCustomAdmin:$doCustomAdmin
+    New-RootGitignore -Root $root -BackendDirName $backendDirName -FrontendDirName $frontendDirName
     New-ProjectReadme -Root $root -AppName $AppName `
-        -HasCustomAdmin $doCustomAdmin -HasFrontend $doFrontend -HasDocker $doDocker
+        -HasCustomAdmin $doCustomAdmin -HasFrontend $doFrontend -HasDocker $doDocker `
+        -BackendDirName $backendDirName -FrontendDirName $frontendDirName
     $corsExample = Get-CorsOrigins -HasFrontend $doFrontend
     $astroEnvBlock = if ($doFrontend) {
         @"
@@ -456,7 +517,8 @@ $astroEnvBlock
 
     Start-PipelineStep -Title "Verification structure" -Detail "fichiers obligatoires"
     Test-ProjectStructure -Root $root -AppName $AppName `
-        -ExpectCustomAdmin $doCustomAdmin -ExpectFrontend $doFrontend -ExpectDocker $doDocker
+        -ExpectCustomAdmin $doCustomAdmin -ExpectFrontend $doFrontend -ExpectDocker $doDocker `
+        -BackendDirName $backendDirName -FrontendDirName $frontendDirName
     Complete-PipelineStep
 
     Start-PipelineStep -Title "Migrations Django" -Detail "migrate initiale automatique"
@@ -470,7 +532,7 @@ $astroEnvBlock
         } else {
             "SQLite"
         }
-        $needsMakemigrations = Test-AppDefinesModels -Root $root -AppName $AppName
+        $needsMakemigrations = Test-AppDefinesModels -Root $backend -AppName $AppName
         if ($needsMakemigrations) {
             Write-Host "     makemigrations $AppName + migrate ($dbLabel)" -ForegroundColor DarkGray
         } else {
@@ -489,7 +551,7 @@ Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v pu
 "@
             }
         }
-        Invoke-DjangoMigrationBootstrap -Root $root -AppName $AppName -RunMakemigrations:$needsMakemigrations
+        Invoke-DjangoMigrationBootstrap -Root $backend -AppName $AppName -RunMakemigrations:$needsMakemigrations
         Complete-PipelineStep -Message "migrations appliquees"
     }
 
@@ -503,7 +565,7 @@ Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v pu
         }
         Start-PipelineStep -Title "Superuser Django" -Detail $suDetail
         try {
-            Invoke-DjangoCreatesuperuser -Root $root -NoInteractive:$NoInteractive.IsPresent
+            Invoke-DjangoCreatesuperuser -Root $backend -NoInteractive:$NoInteractive.IsPresent
             $suMsg = if (Test-ProjectDotEnvUsesPostgres -Root $root) {
                 "compte admin (PostgreSQL)"
             } else {
@@ -512,7 +574,7 @@ Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v pu
             Complete-PipelineStep -Message $suMsg
         } catch {
             Write-Host "     createsuperuser echoue : $($_.Exception.Message)" -ForegroundColor DarkYellow
-            Write-Host "     Relancez : uv run python manage.py createsuperuser" -ForegroundColor DarkYellow
+            Write-Host "     Relancez : cd $backendDirName ; uv run python manage.py createsuperuser" -ForegroundColor DarkYellow
             Complete-PipelineStep -Message "a completer manuellement"
         }
     } else {
@@ -520,7 +582,8 @@ Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v pu
     }
 
     Write-PipelineSummary -Root $root -AppName $AppName `
-        -HasCustomAdmin $doCustomAdmin -HasFrontend $doFrontend -HasDocker $doDocker
+        -HasCustomAdmin $doCustomAdmin -HasFrontend $doFrontend -HasDocker $doDocker `
+        -BackendDirName $backendDirName -FrontendDirName $frontendDirName
 }
 catch {
     Write-Failure -Message $_.Exception.Message

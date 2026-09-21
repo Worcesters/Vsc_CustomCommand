@@ -1,0 +1,130 @@
+<div class="console-editor" id="console-editor">
+  <div class="console-editor__head">
+    <div class="console-editor__title">
+      <span>{{ table_name }}</span>
+      <span class="console-badge">{{ display_rows|length }} affichees</span>
+      <span class="console-badge">{{ source }}</span>
+    </div>
+    <p class="console-editor__hint">Cliquez une cellule pour l&rsquo;editer</p>
+  </div>
+  {% if display_rows %}
+  <div class="console-editor__scroll">
+    <table class="console-editor__table">
+      <thead>
+        <tr>
+          {% for col in columns %}
+            <th>
+              {% if col == pk %}<span class="console-editor__pk" title="Cle primaire">&#9670;</span>{% endif %}
+              {{ col }}
+            </th>
+          {% endfor %}
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in display_rows %}
+          <tr>
+            {% for cell in row.cells %}
+              <td class="console-editor__cell {% if cell.is_pk %}console-editor__cell--pk{% endif %} {% if not cell.is_editable %}console-editor__cell--readonly{% endif %}"
+                  {% if cell.is_editable %}
+                  x-data="{ editing: false, draft: '{{ cell.display|escapejs }}' }"
+                  @click="if (!editing) editing = true"
+                  {% endif %}>
+                {% if not cell.is_editable %}
+                  {% if cell.is_null %}<span class="console-editor__null">NULL</span>{% else %}{{ cell.display }}{% endif %}
+                {% else %}
+                  <span x-show="!editing">{% if cell.is_null %}<span class="console-editor__null">NULL</span>{% else %}{{ cell.display }}{% endif %}</span>
+                  <form
+                    x-show="editing"
+                    x-cloak
+                    class="console-editor__edit"
+                    method="post"
+                    hx-post="{% url 'admin_panel:console_cell_update' table_name %}"
+                    hx-target="#console-table-panel"
+                    hx-swap="innerHTML"
+                    @click.stop
+                  >
+                    {% csrf_token %}
+                    <input type="hidden" name="primary_key" value="{{ pk }}">
+                    <input type="hidden" name="primary_key_value" value="{{ row.pk_value }}">
+                    <input type="hidden" name="column" value="{{ cell.name }}">
+                    <input class="console-editor__input" type="text" name="value" x-model="draft">
+                    <button type="submit" class="console-btn console-btn--primary console-btn--sm">OK</button>
+                    <button type="button" class="console-btn console-btn--ghost console-btn--sm" @click="editing = false">X</button>
+                  </form>
+                {% endif %}
+              </td>
+            {% endfor %}
+            <td>
+              {% if pk %}
+              <form
+                method="post"
+                hx-post="{% url 'admin_panel:console_row_delete' table_name %}"
+                hx-target="#console-table-panel"
+                hx-swap="innerHTML"
+                hx-confirm="Supprimer cette ligne ?"
+              >
+                {% csrf_token %}
+                <input type="hidden" name="primary_key" value="{{ pk }}">
+                <input type="hidden" name="primary_key_value" value="{{ row.pk_value }}">
+                <button type="submit" class="console-btn console-btn--danger console-btn--sm">Suppr.</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <p class="console-editor__empty">Aucune ligne (ou table vide).</p>
+  {% endif %}
+
+  <div class="console-editor__actions">
+    <details>
+      <summary class="console-btn console-btn--secondary console-btn--sm">Inserer une ligne</summary>
+      <form
+        class="console-form"
+        method="post"
+        hx-post="{% url 'admin_panel:console_row_insert' table_name %}"
+        hx-target="#console-table-panel"
+        hx-swap="innerHTML"
+        novalidate
+        x-data="{ tried: false }"
+        @submit="
+          tried = true;
+          if (!$el.checkValidity()) {
+            $event.preventDefault();
+            $event.stopPropagation();
+          }
+        "
+      >
+        {% csrf_token %}
+        <p class="console-form__hint"><abbr class="console-form__req" title="Obligatoire">*</abbr> Champ obligatoire</p>
+        <div class="console-form__row">
+          {% for field in insert_fields %}
+            <label class="console-form__field">
+              <span class="console-form__label">
+                {{ field.label }}
+                {% if field.required %}<abbr class="console-form__req" title="Obligatoire">*</abbr>{% endif %}
+              </span>
+              <input
+                class="console-form__input"
+                type="{{ field.input_type|default:'text' }}"
+                name="field__{{ field.name }}"
+                {% if field.required %}required aria-required="true"{% endif %}
+                :class="tried && $el.validity && !$el.validity.valid && 'console-form__input--invalid'"
+                @input="if (tried) $el.reportValidity()"
+              >
+            </label>
+          {% empty %}
+            <p class="console-empty">Aucun champ insertable.</p>
+          {% endfor %}
+        </div>
+        <button type="submit" class="console-btn console-btn--primary console-btn--sm">Creer</button>
+      </form>
+    </details>
+  </div>
+
+  {% include "console/partials/_structure.html" %}
+</div>

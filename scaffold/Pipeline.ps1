@@ -70,7 +70,9 @@ function Write-PipelineSummary {
         [string]$AppName,
         [bool]$HasCustomAdmin,
         [bool]$HasFrontend,
-        [bool]$HasDocker
+        [bool]$HasDocker,
+        [string]$BackendDirName = "backend",
+        [string]$FrontendDirName = "frontend"
     )
     Write-Host ""
     Write-Host ("=" * 62) -ForegroundColor Green
@@ -80,10 +82,10 @@ function Write-PipelineSummary {
     Write-Host "  App Django  : apps.$AppName"
     $adminLabel = if ($HasCustomAdmin) { "admin_panel + /api/admin/" } else { "django.contrib.admin (/django-admin/)" }
     Write-Host "  Admin       : $adminLabel"
-    Write-Host "  Layout      : Django a la racine (manage.py, apps/, config/) + frontend/ Astro"
+    Write-Host "  Layout      : $BackendDirName/ (Django) + $(if ($HasFrontend) { "$FrontendDirName/ (Astro)" } else { "pas de frontend" })"
     Write-Host ""
     Write-Host "  Backend (dev) :" -ForegroundColor White
-    Write-Host "    cd `"$Root`""
+    Write-Host "    cd `"$Root\$BackendDirName`""
     Write-Host "    uv run python manage.py runserver"
     if (-not $HasFrontend) {
         Write-Host ""
@@ -101,8 +103,8 @@ function Write-PipelineSummary {
         Write-Host "    .\scripts\dev-local.ps1"
         Write-Host ""
         Write-Host "  Ou manuellement :" -ForegroundColor White
-        Write-Host "    Terminal 1 : cd `"$Root`" ; uv run python manage.py runserver"
-        Write-Host "    Terminal 2 : cd `"$Root\frontend`" ; pnpm dev"
+        Write-Host "    Terminal 1 : cd `"$Root\$BackendDirName`" ; uv run python manage.py runserver"
+        Write-Host "    Terminal 2 : cd `"$Root\$FrontendDirName`" ; pnpm dev"
         Write-Host ""
         Write-Host "  URLs :" -ForegroundColor White
         Write-Host "    http://127.0.0.1:4321        (UI produit Astro)"
@@ -116,13 +118,14 @@ function Write-PipelineSummary {
     if ($HasDocker) {
         Write-Host ""
         if ($HasFrontend) {
-            Write-Host "  Docker (db + redis + web + frontend + worker/beat) :" -ForegroundColor White
-            Write-Host "    cd `"$Root`""
-            Write-Host "    `$env:DOCKER_BUILDKIT=1; docker compose up --build"
+            Write-Host "  Docker :" -ForegroundColor White
+            Write-Host "    Global   : cd `"$Root`" ; docker compose up --build"
+            Write-Host "    Backend  : cd `"$Root\$BackendDirName`" ; docker compose up --build  (uv sync --frozen)"
+            Write-Host "    Frontend : cd `"$Root\$FrontendDirName`" ; docker compose up --build"
         } else {
             Write-Host "  Docker (db + web Django) :" -ForegroundColor White
-            Write-Host "    cd `"$Root`""
-            Write-Host "    `$env:DOCKER_BUILDKIT=1; docker compose up --build"
+            Write-Host "    Global  : cd `"$Root`" ; docker compose up --build"
+            Write-Host "    Backend : cd `"$Root\$BackendDirName`" ; docker compose up --build  (uv sync --frozen)"
             Write-Host "    API : http://localhost:8000 - admin Django dev : /django-admin/"
         }
     }

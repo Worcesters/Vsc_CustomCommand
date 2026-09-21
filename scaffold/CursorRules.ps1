@@ -29,7 +29,9 @@ function New-CursorProjectRules {
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$AppName,
         [bool]$HasCustomAdmin = $true,
-        [bool]$HasFrontend = $true
+        [bool]$HasFrontend = $true,
+        [string]$BackendDirName = "backend",
+        [string]$FrontendDirName = "frontend"
     )
 
     $cursorDir = Join-Path $Root ".cursor"
@@ -38,14 +40,14 @@ function New-CursorProjectRules {
     New-Item -ItemType Directory -Path $rulesDir -Force | Out-Null
     New-Item -ItemType Directory -Path $skillsDir -Force | Out-Null
 
-    $htmxRows = "| ``templates/`` | UI interne HTMX (back-office, partials) |`n| ``static/scss/`` | SCSS 7-1 (HTMX + tokens) |`n"
+    $htmxRows = "| ``$BackendDirName/templates/`` | UI interne HTMX (back-office, partials) |`n| ``$BackendDirName/static/scss/`` | SCSS 7-1 (HTMX + tokens) |`n"
     $feRow = if ($HasFrontend) {
-        "| ``frontend/`` | Astro UI produit (port 4321, zero React) |`n"
+        "| ``$FrontendDirName/`` | Astro UI produit (port 4321, zero React) |`n"
     } else {
         ""
     }
     $adminPanelRow = if ($HasCustomAdmin) {
-        "| ``apps/admin_panel/`` | Registry whitelist + API Django Ninja ``/api/admin/`` |`n"
+        "| ``$BackendDirName/apps/admin_panel/`` | Registry whitelist + API Django Ninja ``/api/admin/`` |`n"
     } else {
         ""
     }
@@ -88,10 +90,13 @@ function New-CursorProjectRules {
 ## Racine monorepo
 | Chemin | Role |
 |--------|------|
-| ``config/`` | Settings Django (dev/qua/prod), urls, wsgi/asgi, celery |
-| ``apps/`` | Apps metier (Service Layer strict) |
-$htmxRows$feRow$adminPanelRow| ``tests/`` | Pytest |
-| ``docker-compose.yml`` / ``docker-compose.prod.yml`` | Dev local / prod |
+| ``$BackendDirName/`` | Django Ninja (manage.py, apps, config, templates HTMX, static) |
+| ``$BackendDirName/config/`` | Settings Django (dev/qua/prod), urls, wsgi/asgi, celery |
+| ``$BackendDirName/apps/`` | Apps metier (Service Layer strict) |
+$htmxRows$feRow$adminPanelRow| ``$BackendDirName/tests/`` | Pytest |
+| ``docker-compose.yml`` / ``docker-compose.prod.yml`` | Compose **global** (include ``$BackendDirName/`` + ``$FrontendDirName/``) |
+| ``$BackendDirName/docker-compose.yml`` | Django (db, redis, web, worker, beat) ; ``uv sync --frozen`` a chaque up |
+$(if ($HasFrontend) { "| ``$FrontendDirName/docker-compose.yml`` | Astro :4321 (API via localhost:8000) |`n" } else { "" })
 
 ## Apps Django
 | App | Role |
@@ -99,9 +104,9 @@ $htmxRows$feRow$adminPanelRow| ``tests/`` | Pytest |
 | ``apps.$AppName`` | App metier (modeles custom ; User = ``auth.User``) |
 
 ## Frontiere UI
-- Surface **publique / produit** → Astro (``frontend/``).
-- Surface **staff / admin / CRUD interne** → HTMX (templates Django).
-- Ne pas melanger HTMX dans ``frontend/`` ni islands Astro dans les templates Django.
+- Surface **publique / produit** → Astro (``$FrontendDirName/``).
+- Surface **staff / admin / CRUD interne** → HTMX (templates Django dans ``$BackendDirName/templates/``).
+- Ne pas melanger HTMX dans ``$FrontendDirName/`` ni islands Astro dans les templates Django.
 $feSection$adminSection
 "@
     Write-TextFile -Path (Join-Path $cursorDir "app-structure.md") -Content $structure
@@ -217,8 +222,10 @@ Skills globales : ``~/.cursor/skills/<nom>/SKILL.md``
 - **Next.js interdit**
 
 ## Docker
-- ``docker compose up --build`` (db, redis, web, frontend?, worker, beat)
-- Backend : image ``uv`` (context ``.``) ; Frontend : Node 22 + Astro :4321
+- Global : ``docker compose up --build`` a la racine (include backend + frontend)
+- Backend : ``cd <backend> && docker compose up --build`` (``uv sync --frozen`` a chaque up)
+- Frontend : ``cd <frontend> && docker compose up --build`` (Astro :4321)
+- Ne pas lancer racine et sous-dossier en parallele (ports)
 
 ## Definition of Done (rappel)
 - [ ] Services/selectors separes ; CBV documentees (MRO si mixins)
@@ -237,10 +244,10 @@ alwaysApply: true
 # Stack monorepo (genere)
 
 ## Architecture
-- Django racine : ``config/settings/`` (base, dev, qua, prod)
-- ``apps/`` : Service Layer strict
-- ``templates/`` + HTMX : UI interne staff
-- ``frontend/`` : UI produit Astro (port 4321) si present
+- Django dans ``$BackendDirName/`` : ``config/settings/`` (base, dev, qua, prod)
+- ``$BackendDirName/apps/`` : Service Layer strict
+- ``$BackendDirName/templates/`` + HTMX : UI interne staff
+- ``$FrontendDirName/`` : UI produit Astro (port 4321) si present
 - API admin : ``/api/admin/`` (``apps.admin_panel``) si present
 - ``django-admin/`` : fallback dev si ``DJANGO_ADMIN_ENABLED=true``
 

@@ -117,12 +117,31 @@ Admin : `apps.admin_panel` → `/admin/` + `/api/admin/`.
 UI staff : templates + HTMX.  
 Vues template = **CBV uniquement**.
 
+## Docker
+
+Trois fichiers Compose (dossiers separes) :
+
+```bash
+# Global (racine) : db + redis + web + frontend + worker + beat
+docker compose up --build
+
+# Backend seul — uv sync --frozen a chaque up
+cd __BACKEND_DIR__ && docker compose up --build
+
+# Frontend seul (Astro :4321, API Django sur localhost:8000)
+cd __FRONTEND_DIR__ && docker compose up --build
+```
+
+Ne pas lancer le compose racine **et** un compose de sous-dossier en meme temps (conflit de ports).
+
+Prod : `docker compose -f docker-compose.prod.yml up --build`
+
 ## Tests
 
 ```powershell
 uv run pytest
 uv run ruff check .
-cd frontend ; pnpm check
+cd __FRONTEND_DIR__ ; pnpm check
 ```
 
 ## Cursor

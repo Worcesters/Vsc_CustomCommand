@@ -9,12 +9,13 @@
   helpers Docker/Postgres pour migrate, et installation des dependances uv.
 
 .NOTES
-  Layout monorepo GENERE (ctoix volontaire, limite le cturn) :
+  Layout monorepo GENERE (noms de dossiers demandés a l'init) :
     projet/
-      manage.py, apps/, config/, templates/, static/   # Django a la RACINE
-      frontend/                                         # Astro (UI produit)
-      Dockerfile, docker-compose.yml                    # context Docker = "."
-  PAS de sous-dossier backend/ - Docker build context = racine du projet.
+      <backend>/   # Django (manage.py, apps/, config/, templates/)
+      <frontend>/  # Astro (UI produit), optionnel
+      docker-compose.yml              # global (include backend + frontend)
+      <backend>/docker-compose.yml   # Django ; uv sync --frozen a chaque up
+      <frontend>/docker-compose.yml  # Astro, optionnel
 
   Origines CORS/CSRF :
     - Avec frontend Astro : http://localhost:4321, http://127.0.0.1:4321
@@ -96,21 +97,42 @@ function Find-AvailablePostgresHostPort {
 function Get-ProjectPostgresHostPort {
     param([Parameter(Mandatory)][string]$Root)
 
-    $envFile = Join-Path $Root ".env"
+    $envFile = Resolve-ProjectDotEnvPath -Root $Root
     if (Test-Path -LiteralPath $envFile) {
         $match = Select-String -LiteralPath $envFile -Pattern '^\s*DJANGO_DB_PORT\s*=\s*(\d+)\s*$' -AllMatches
         if ($match -and $match.Matches.Count -gt 0) {
             return [int]$match.Matches[0].Groups[1].Value
         }
     }
-    $composeFile = Join-Path $Root "docker-compose.yml"
-    if (Test-Path -LiteralPath $composeFile) {
+    foreach ($composeFile in (Get-ProjectComposeFilePaths -Root $Root)) {
         $match = Select-String -LiteralPath $composeFile -Pattern '"(\d+):5432"' -AllMatches
         if ($match -and $match.Matches.Count -gt 0) {
             return [int]$match.Matches[0].Groups[1].Value
         }
     }
     return 5433
+}
+
+function Get-ProjectComposeFilePaths {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $names = @("docker-compose.yml", "docker-compose.dev.yml")
+    $paths = New-Object System.Collections.Generic.List[string]
+    foreach ($name in $names) {
+        $p = Join-Path $Root $name
+        if (Test-Path -LiteralPath $p) {
+            $paths.Add($p)
+        }
+    }
+    Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        foreach ($name in $names) {
+            $p = Join-Path $_.FullName $name
+            if (Test-Path -LiteralPath $p) {
+                $paths.Add($p)
+            }
+        }
+    }
+    return $paths
 }
 
 function Set-ProjectPostgresHostPort {
@@ -138,12 +160,11 @@ function Set-ProjectPostgresHostPort {
         [System.IO.File]::WriteAllText($envFile, ($envLines -join "`n") + "`n", $utf8NoBom)
     }
 
-    foreach ($composeName in @("docker-compose.yml")) {
-        $composePath = Join-Path $Root $composeName
-        if (-not (Test-Path -LiteralPath $composePath)) {
+    foreach ($composePath in (Get-ProjectComposeFilePaths -Root $Root)) {
+        $composeText = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
+        if ($composeText -notmatch '"\d+:5432"') {
             continue
         }
-        $composeText = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
         $composeText = $composeText -replace '"\d+:5432"', "`"${Port}:5432`""
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($composePath, $composeText, $utf8NoBom)
@@ -364,7 +385,7 @@ function Ensure-ComposeDatabaseForDjango {
 function Import-ProjectDotEnv {
     param([Parameter(Mandatory)][string]$Root)
 
-    $envFile = Join-Path $Root ".env"
+    $envFile = Resolve-ProjectDotEnvPath -Root $Root
     if (-not (Test-Path -LiteralPath $envFile)) {
         return
     }
@@ -464,7 +485,7 @@ Arretez l'autre conteneur (docker ps) ou ctangez le mapping dans docker-compose.
 function Test-ProjectDotEnvUsesPostgres {
     param([Parameter(Mandatory)][string]$Root)
 
-    $envFile = Join-Path $Root ".env"
+    $envFile = Resolve-ProjectDotEnvPath -Root $Root
     if (-not (Test-Path -LiteralPath $envFile)) {
         return $false
     }
@@ -628,6 +649,43 @@ function Test-ValidProjectFolderName {
     if ($Name -match '[<>:"/\\|?*]') { return $false }
     if ($Name -match '\.(com|fr|eu|net|org|io)(/|$)') { return $false }
     return $true
+}
+
+function Read-FolderNamePrompt {
+    <#
+    .SYNOPSIS
+      Demande un nom de dossier avec valeur par defaut (Entree = defaut).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
+        [Parameter(Mandatory)][string]$Default
+    )
+    do {
+        $raw = (Read-Host "$Prompt [$Default]").Trim()
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return $Default
+        }
+        if (Test-ValidProjectFolderName -Name $raw) {
+            return $raw
+        }
+        Write-Host "  Nom invalide : pas de \ / : * ? `" < > |, pas d'URL." -ForegroundColor DarkYellow
+    } while ($true)
+}
+
+function Resolve-ProjectDotEnvPath {
+    <#
+    .SYNOPSIS
+      .env du dossier donne, ou du parent (monorepo si Django est dans backend/).
+    #>
+    param([Parameter(Mandatory)][string]$Root)
+
+    $parent = Split-Path -Parent $Root
+    foreach ($candidate in @((Join-Path $Root ".env"), (Join-Path $parent ".env"))) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+    return (Join-Path $Root ".env")
 }
 
 function Write-TextFile {
@@ -1165,65 +1223,73 @@ function New-DevLocalScript {
     param(
         [Parameter(Mandatory)][string]$Root,
         [bool]$HasDocker = $true,
-        [bool]$HasCustomAdmin = $true
+        [bool]$HasCustomAdmin = $true,
+        [string]$BackendDirName = "backend",
+        [string]$FrontendDirName = "frontend"
     )
 
     $scriptsDir = Join-Path $Root "scripts"
     New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
 
-    $devScript = @'
+    $devScript = @"
 # Demarre Django (8000) et Astro (4321) dans deux fenetres PowerShell.
 # Usage : .\scripts\dev-local.ps1
-$ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $PSScriptRoot
-$frontend = Join-Path $root 'frontend'
+`$ErrorActionPreference = 'Stop'
+`$root = Split-Path -Parent `$PSScriptRoot
+`$backend = Join-Path `$root '$BackendDirName'
+`$frontend = Join-Path `$root '$FrontendDirName'
 
-if (-not (Test-Path -LiteralPath (Join-Path $root 'manage.py'))) {
-    Write-Error "manage.py introuvable. Lancez depuis la racine du projet genere."
+if (-not (Test-Path -LiteralPath (Join-Path `$backend 'manage.py'))) {
+    Write-Error "$BackendDirName/manage.py introuvable. Lancez depuis la racine du monorepo."
 }
-if (-not (Test-Path -LiteralPath (Join-Path $frontend 'package.json'))) {
-    Write-Error "frontend/package.json introuvable."
+if (-not (Test-Path -LiteralPath (Join-Path `$frontend 'package.json'))) {
+    Write-Error "$FrontendDirName/package.json introuvable."
 }
 
 Write-Host 'Demarrage backend (uv run python manage.py runserver)...' -ForegroundColor Cyan
 Start-Process powershell -ArgumentList @(
     '-NoExit', '-NoProfile', '-Command',
-    ("Set-Location -LiteralPath '" + $root + "'; uv run python manage.py runserver 0.0.0.0:8000")
+    ("Set-Location -LiteralPath '" + `$backend + "'; uv run python manage.py runserver 0.0.0.0:8000")
 )
 
 Write-Host 'Demarrage frontend Astro (pnpm dev :4321)...' -ForegroundColor Cyan
 Start-Process powershell -ArgumentList @(
     '-NoExit', '-NoProfile', '-Command',
-    ("Set-Location -LiteralPath '" + $frontend + "'; if (Get-Command pnpm -ErrorAction SilentlyContinue) { pnpm dev } else { npm run dev }")
+    ("Set-Location -LiteralPath '" + `$frontend + "'; if (Get-Command pnpm -ErrorAction SilentlyContinue) { pnpm dev } else { npm run dev }")
 )
 
 Write-Host ''
 Write-Host 'Serveurs en cours de demarrage :' -ForegroundColor Green
 Write-Host '  Backend  : http://127.0.0.1:8000'
 Write-Host '  Frontend : http://127.0.0.1:4321'
-'@
+"@
     if ($HasCustomAdmin) {
-        $devScript += @'
+        $devScript += @"
+
 Write-Host '  Admin    : http://127.0.0.1:8000/admin/'
 Write-Host '  Login    : http://127.0.0.1:8000/accounts/login/'
-'@
+"@
     } else {
-        $devScript += @'
+        $devScript += @"
+
 Write-Host '  Back-office : http://127.0.0.1:8000/backoffice/'
 Write-Host '  Admin Django : http://127.0.0.1:8000/django-admin/'
-'@
+"@
     }
-    $devScript += @'
+    $devScript += @"
+
 Write-Host ''
 Write-Host 'Si le port 4321 reste inaccessible, verifiez la fenetre frontend (erreur pnpm/node).'
-'@
+"@
     if ($HasDocker) {
-        $devScript += @'
+        $devScript += @"
 
-# Alternative Docker (db + web + frontend) :
-#   docker compose up --build
+# Alternative Docker :
+#   docker compose up --build                          # global (racine)
+#   cd backend ; docker compose up --build             # Django + uv sync --frozen
+#   cd frontend ; docker compose up --build            # Astro seul
 # Puis http://127.0.0.1:4321 (attendre que le service frontend soit healthy)
-'@
+"@
     }
     Write-TextFile -Path (Join-Path $scriptsDir "dev-local.ps1") -Content $devScript
 }

@@ -135,10 +135,11 @@ function New-AstroFrontend {
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$ProjectSlug,
         [Parameter(Mandatory)][string]$AppName,
-        [bool]$HasCustomAdmin = $true
+        [bool]$HasCustomAdmin = $true,
+        [string]$FrontendDirName = "frontend"
     )
 
-    $fe = Join-Path $Root "frontend"
+    $fe = Join-Path $Root $FrontendDirName
     $templates = Get-AstroTemplatesRoot
 
     Write-Host "     Astro frontend -> $fe (templates: $templates)" -ForegroundColor DarkGray

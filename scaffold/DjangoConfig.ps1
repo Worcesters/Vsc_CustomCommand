@@ -362,19 +362,19 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1", "web", "host.docker.internal"]
 
 
 def _load_dotenv() -> None:
-    """Charge .env a la racine (PostgreSQL hote = meme base que Docker db)."""
-    env_path = BASE_DIR / ".env"
-    if not env_path.is_file():
-        return
-    for raw in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    """Charge .env du backend puis du monorepo parent."""
+    for env_path in (BASE_DIR / ".env", BASE_DIR.parent / ".env"):
+        if not env_path.is_file():
             continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
 
 
 _load_dotenv()
