@@ -209,12 +209,80 @@ function Test-PostgresHostTcpReady {
     }
 }
 
+function Get-ProjectPythonExe {
+    <#
+    .SYNOPSIS
+      Python du venv Django (racine ou sous-dossier backend/).
+    #>
+    param([Parameter(Mandatory)][string]$Root)
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $candidates.Add((Join-Path $Root ".venv\Scripts\python.exe"))
+    $candidates.Add((Join-Path $Root ".venv\bin\python"))
+    Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $candidates.Add((Join-Path $_.FullName ".venv\Scripts\python.exe"))
+        $candidates.Add((Join-Path $_.FullName ".venv\bin\python"))
+    }
+    foreach ($p in $candidates) {
+        if ($p -and (Test-Path -LiteralPath $p)) {
+            return $p
+        }
+    }
+    return $null
+}
+
+function Get-DatabaseComposeContext {
+    <#
+    .SYNOPSIS
+      Compose qui definit le service db (backend/docker-compose.yml, pas le include racine).
+    #>
+    param([Parameter(Mandatory)][string]$Root)
+
+    $project = Split-Path -Leaf $Root
+    $project = $project -replace '[^a-zA-Z0-9._-]', '-'
+    $project = $project.Trim('._-')
+    if ([string]::IsNullOrWhiteSpace($project)) {
+        $project = "app"
+    }
+    if ($project -match '^[0-9]') {
+        $project = "p$project"
+    }
+
+    $files = New-Object System.Collections.Generic.List[string]
+    Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $p = Join-Path $_.FullName "docker-compose.yml"
+        if (Test-Path -LiteralPath $p) {
+            $files.Add($p)
+        }
+    }
+    $rootCompose = Join-Path $Root "docker-compose.yml"
+    if (Test-Path -LiteralPath $rootCompose) {
+        $files.Add($rootCompose)
+    }
+
+    foreach ($p in $files) {
+        $raw = Get-Content -LiteralPath $p -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($raw -and ($raw -match '(?m)^  db:\s*$')) {
+            return @{
+                File    = $p
+                Project = $project
+                WorkDir = $Root
+            }
+        }
+    }
+    return @{
+        File    = $rootCompose
+        Project = $project
+        WorkDir = $Root
+    }
+}
+
 function Test-PostgresHostSqlReady {
     param([Parameter(Mandatory)][string]$Root)
 
     Import-ProjectDotEnv -Root $Root
-    $pythonExe = Join-Path $Root ".venv\Scripts\python.exe"
-    if (-not (Test-Path -LiteralPath $pythonExe)) {
+    $pythonExe = Get-ProjectPythonExe -Root $Root
+    if (-not $pythonExe) {
         return $false
     }
     $py = @'
@@ -241,7 +309,11 @@ with psycopg.connect(
         cur.execute("SELECT 1")
         cur.fetchone()
 '@
-    $probePath = Join-Path $Root ".postgres_probe.py"
+    $probeDir = Split-Path -Parent $pythonExe
+    if ($probeDir -match '[\\/]\.venv[\\/]') {
+        $probeDir = Split-Path -Parent (Split-Path -Parent $probeDir)
+    }
+    $probePath = Join-Path $probeDir ".postgres_probe.py"
     try {
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($probePath, $py, $utf8NoBom)
@@ -282,16 +354,48 @@ function Wait-PostgresForMigrate {
                 Write-Host "     PostgreSQL indisponible - redemarrage du service db..." -ForegroundColor DarkYellow
             }
             $script:ComposeDatabaseReady = $false
-            Start-ComposeDatabaseService -Root $Root -TimeoutSeconds 45
+            try {
+                Start-ComposeDatabaseService -Root $Root -TimeoutSeconds 45
+            } catch {
+                Write-Host "     $($_.Exception.Message)" -ForegroundColor DarkYellow
+            }
         }
         Start-Sleep -Seconds 2
     }
 
+    Write-ComposeDatabaseDiagnostics -Root $Root
     throw @"
 PostgreSQL non pret pour migrate apres ${TimeoutSeconds}s (localhost:$hostPort).
 Verifiez : docker compose ps
 Reinitialisez : docker compose down -v puis docker compose up -d db
 "@
+}
+
+function Write-ComposeDatabaseDiagnostics {
+    param([Parameter(Mandatory)][string]$Root)
+
+    $ctx = Get-DatabaseComposeContext -Root $Root
+    if (-not (Test-Path -LiteralPath $ctx.File)) {
+        Write-Host "     Compose db introuvable." -ForegroundColor DarkYellow
+        return
+    }
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    Push-Location -LiteralPath $ctx.WorkDir
+    try {
+        Write-Host "     docker compose -f $($ctx.File) ps" -ForegroundColor DarkGray
+        & docker compose -p $ctx.Project -f $ctx.File ps 2>&1 | ForEach-Object {
+            Write-Host "       $_" -ForegroundColor DarkGray
+        }
+        & docker compose -p $ctx.Project -f $ctx.File logs db --tail 20 2>&1 | ForEach-Object {
+            Write-Host "       $_" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host "     diagnostic compose ignore : $($_.Exception.Message)" -ForegroundColor DarkGray
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $prevEap
+    }
 }
 
 function Test-ComposeDatabaseAcceptsConnections {
@@ -308,11 +412,15 @@ function Test-ComposeDatabaseAcceptsConnections {
         return $true
     }
 
+    $ctx = Get-DatabaseComposeContext -Root $Root
+    if (-not (Test-Path -LiteralPath $ctx.File)) {
+        return $false
+    }
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    Push-Location -LiteralPath $Root
+    Push-Location -LiteralPath $ctx.WorkDir
     try {
-        & docker compose exec -T db pg_isready -U app -d app 2>$null | Out-Null
+        & docker compose -p $ctx.Project -f $ctx.File exec -T db pg_isready -U app -d app 2>$null | Out-Null
         return ($LASTEXITCODE -eq 0)
     } finally {
         Pop-Location
@@ -326,16 +434,27 @@ function Invoke-DockerCompose {
         [Parameter(Mandatory)][string[]]$ComposeArguments
     )
 
+    $ctx = Get-DatabaseComposeContext -Root $Root
+    $tail = @($ComposeArguments)
+    if ($tail.Count -gt 0 -and $tail[0] -eq "compose") {
+        if ($tail.Count -gt 1) {
+            $tail = @($tail[1..($tail.Count - 1)])
+        } else {
+            $tail = @()
+        }
+    }
+    $composeArgs = @("compose", "-p", $ctx.Project, "-f", $ctx.File) + $tail
+
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    Push-Location -LiteralPath $Root
+    Push-Location -LiteralPath $ctx.WorkDir
     try {
-        $output = & docker @ComposeArguments 2>&1
+        $output = & docker @composeArgs 2>&1
         $exitCode = $LASTEXITCODE
         if ($exitCode -eq 0) {
             return
         }
-        $argsText = $ComposeArguments -join " "
+        $argsText = $composeArgs -join " "
         $detail = Get-DockerCliOutputText -Output $output
         $isDbUp = $argsText -match "compose\s+up\b" -and $argsText -match "\bdb\b"
         if ($isDbUp -and (Test-ComposeDatabaseAcceptsConnections -Root $Root -QuickTcpOnly)) {

@@ -112,6 +112,7 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 $script:ScaffoldFailed = $false
 $script:PreviousNativeCommandErrorPreference = $null
 $script:ComposeDatabaseReady = $false
+$script:MigrateDeferred = $false
 $script:DbEnvKeys = @(
     "DJANGO_DB_HOST", "DJANGO_DB_ENGINE", "DJANGO_DB_NAME",
     "DJANGO_DB_USER", "DJANGO_DB_PASSWORD", "DJANGO_DB_PORT", "DJANGO_USE_POSTGRES"
@@ -540,22 +541,38 @@ $astroEnvBlock
         }
         if (Test-ProjectDotEnvUsesPostgres -Root $root) {
             if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-                throw "Docker requis pour PostgreSQL (.env) : installez Docker Desktop"
-            }
-            try {
-                Ensure-ComposeDatabaseForDjango -Root $root -TimeoutSeconds 90 -ForMigrate
-            } catch {
-                throw @"
-PostgreSQL indisponible pour les migrations : $($_.Exception.Message)
-Verifiez Docker (docker compose ps) ou reinitialisez : docker compose down -v puis docker compose up -d db
-"@
+                Write-Host "     Docker introuvable : migrate PostgreSQL ignoree." -ForegroundColor DarkYellow
+                Write-Host "     Plus tard : docker compose up -d db ; cd $backendDirName ; uv run python manage.py migrate" -ForegroundColor DarkYellow
+                Complete-PipelineStep -Message "migrate a completer manuellement"
+                $script:MigrateDeferred = $true
+            } else {
+                try {
+                    Ensure-ComposeDatabaseForDjango -Root $root -TimeoutSeconds 90 -ForMigrate
+                } catch {
+                    Write-Host "     $($_.Exception.Message)" -ForegroundColor DarkYellow
+                    Write-Host "     Plus tard : docker compose up -d db ; cd $backendDirName ; uv run python manage.py migrate" -ForegroundColor DarkYellow
+                    Complete-PipelineStep -Message "migrate a completer manuellement"
+                    $script:MigrateDeferred = $true
+                }
             }
         }
-        Invoke-DjangoMigrationBootstrap -Root $backend -AppName $AppName -RunMakemigrations:$needsMakemigrations
-        Complete-PipelineStep -Message "migrations appliquees"
+        if (-not $script:MigrateDeferred) {
+            try {
+                Invoke-DjangoMigrationBootstrap -Root $backend -AppName $AppName -RunMakemigrations:$needsMakemigrations
+                Complete-PipelineStep -Message "migrations appliquees"
+            } catch {
+                Write-Host "     migrate echoue : $($_.Exception.Message)" -ForegroundColor DarkYellow
+                Write-Host "     Plus tard : cd $backendDirName ; uv run python manage.py migrate" -ForegroundColor DarkYellow
+                Complete-PipelineStep -Message "migrate a completer manuellement"
+                $script:MigrateDeferred = $true
+            }
+        }
     }
 
-    if (-not $SkipCreatesuperuser.IsPresent) {
+    if ($script:MigrateDeferred) {
+        Write-Host "     Superuser ignore (migrate non appliquee)." -ForegroundColor DarkYellow
+        Write-Host "     Plus tard : cd $backendDirName ; uv run python manage.py createsuperuser" -ForegroundColor DarkYellow
+    } elseif (-not $SkipCreatesuperuser.IsPresent) {
         $suDetail = if ($doFrontend) {
             "createsuperuser pour /login Astro"
         } elseif ($doCustomAdmin) {
